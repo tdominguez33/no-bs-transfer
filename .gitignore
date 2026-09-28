@@ -1,0 +1,37 @@
+# Ejecutables y Binarios Compilados
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.syso
+/no-bs-transfer.exe
+build/bin/
+
+# Generados por Wails al compilar
+build/windows/installer/wails_tools.nsh
+frontend/package.json.md5
+
+# Compilados del Frontend (Vite / Svelte)
+frontend/dist/
+dist/
+
+# Dependencias de Node
+node_modules/
+frontend/node_modules/
+
+# Configuración y secretos del usuario
+config.json
+.env
+.env.*
+!.env.example
+
+# Editores, IDEs y Sistema Operativo
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+*.log
