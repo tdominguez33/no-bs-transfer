@@ -29,6 +29,20 @@ export namespace config {
 
 export namespace main {
 	
+	export class CloudflaredStatus {
+	    installed: boolean;
+	    path: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new CloudflaredStatus(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.installed = source["installed"];
+	        this.path = source["path"];
+	    }
+	}
 	export class FileShareItem {
 	    id: string;
 	    name: string;

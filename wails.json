@@ -8,6 +8,6 @@
   "frontend:dev:serverUrl": "auto",
   "info": {
     "productName": "no-bs-transfer",
-    "productVersion": "0.1.0"
+    "productVersion": "0.2.0"
   }
 }

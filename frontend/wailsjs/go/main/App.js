@@ -6,8 +6,24 @@ export function AddFilesToShare(arg1) {
   return window['go']['main']['App']['AddFilesToShare'](arg1);
 }
 
+export function CancelCloudflaredDownload() {
+  return window['go']['main']['App']['CancelCloudflaredDownload']();
+}
+
 export function CopyToClipboard(arg1) {
   return window['go']['main']['App']['CopyToClipboard'](arg1);
+}
+
+export function DownloadCloudflared() {
+  return window['go']['main']['App']['DownloadCloudflared']();
+}
+
+export function EnsureCloudflared() {
+  return window['go']['main']['App']['EnsureCloudflared']();
+}
+
+export function GetCloudflaredStatus() {
+  return window['go']['main']['App']['GetCloudflaredStatus']();
 }
 
 export function GetConfig() {

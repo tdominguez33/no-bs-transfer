@@ -10,6 +10,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -108,9 +109,13 @@ func (s *Server) AddFiles(newFiles []*SharedFile) {
 	}
 }
 
-func (s *Server) registerDownload(fileID string, cancel context.CancelFunc) int64 {
+func (s *Server) registerDownload(fileID string, cancel context.CancelFunc) (int64, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	if !s.running {
+		return 0, false
+	}
 
 	s.nextDownloadID++
 	id := s.nextDownloadID
@@ -121,7 +126,7 @@ func (s *Server) registerDownload(fileID string, cancel context.CancelFunc) int6
 		s.activeDownloads[fileID] = make(map[int64]context.CancelFunc)
 	}
 	s.activeDownloads[fileID][id] = cancel
-	return id
+	return id, true
 }
 
 func (s *Server) unregisterDownload(fileID string, id int64) {
@@ -196,9 +201,22 @@ func (s *Server) Stop() {
 	}
 }
 
+func isValidGuestID(val string) bool {
+	if len(val) == 0 || len(val) > 32 {
+		return false
+	}
+	for i := 0; i < len(val); i++ {
+		c := val[i]
+		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_') {
+			return false
+		}
+	}
+	return true
+}
+
 func (s *Server) getGuestID(w http.ResponseWriter, r *http.Request) string {
 	cookie, err := r.Cookie("nbs_guest")
-	if err == nil && cookie.Value != "" {
+	if err == nil && isValidGuestID(cookie.Value) {
 		return cookie.Value
 	}
 
@@ -248,6 +266,12 @@ func (c *countingReadSeeker) Seek(offset int64, whence int) (int64, error) {
 
 // handleRouter routes /{code} to bundle landing (if bundleCode) or directly to file download (if file ID), and hides root /
 func (s *Server) handleRouter(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		w.Header().Set("Allow", "GET, HEAD")
+		http.Error(w, "Método no permitido", http.StatusMethodNotAllowed)
+		return
+	}
+
 	path := strings.Trim(r.URL.Path, "/")
 	if path == "" {
 		http.NotFound(w, r)
@@ -328,7 +352,8 @@ func (s *Server) serveFile(w http.ResponseWriter, r *http.Request, fileInfo *Sha
 		return
 	}
 
-	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", fileInfo.Name))
+	escapedName := url.PathEscape(fileInfo.Name)
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q; filename*=UTF-8''%s", fileInfo.Name, escapedName))
 	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
 
 	// If HEAD request, serve headers only without creating a transfer record
@@ -340,7 +365,11 @@ func (s *Server) serveFile(w http.ResponseWriter, r *http.Request, fileInfo *Sha
 	dlCtx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 
-	dlID := s.registerDownload(fileInfo.ID, cancel)
+	dlID, ok := s.registerDownload(fileInfo.ID, cancel)
+	if !ok {
+		http.Error(w, "Servidor deteniéndose", http.StatusServiceUnavailable)
+		return
+	}
 	defer s.unregisterDownload(fileInfo.ID, dlID)
 
 	r = r.WithContext(dlCtx)
@@ -348,13 +377,17 @@ func (s *Server) serveFile(w http.ResponseWriter, r *http.Request, fileInfo *Sha
 	guestID := s.getGuestID(w, r)
 	clientIP := r.RemoteAddr
 	if forwarded := r.Header.Get("CF-Connecting-IP"); forwarded != "" {
-		clientIP = forwarded
+		clientIP = strings.TrimSpace(forwarded)
 	} else if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		clientIP = xff
+		parts := strings.Split(xff, ",")
+		clientIP = strings.TrimSpace(parts[0])
+	}
+	if host, _, err := net.SplitHostPort(clientIP); err == nil {
+		clientIP = host
 	}
 
-	startOffset := parseRangeStart(r.Header.Get("Range"), fileInfo.RawBytes)
-	gt := s.tracker.StartTransfer(guestID, fileInfo.ID, fileInfo.Name, fileInfo.RawBytes, clientIP, r.UserAgent(), startOffset)
+	startOffset := parseRangeStart(r.Header.Get("Range"), fi.Size())
+	gt := s.tracker.StartTransfer(guestID, fileInfo.ID, fileInfo.Name, fi.Size(), clientIP, r.UserAgent(), startOffset)
 	defer s.tracker.OnConnectionClosed(gt.ID)
 
 	countingSeeker := &countingReadSeeker{

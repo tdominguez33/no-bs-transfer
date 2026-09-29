@@ -8,13 +8,21 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
+
+	"no-bs-transfer/pkg/config"
 )
 
 var tunnelRegex = regexp.MustCompile(`https://[a-zA-Z0-9-]+\.trycloudflare\.com`)
+
+// fileExists checks if a file exists, is not a directory, and has non-zero size
+func fileExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && !info.IsDir() && info.Size() > 0
+}
 
 // Manager handles the cloudflared process lifecycle
 type Manager struct {
@@ -31,27 +39,115 @@ func NewManager() *Manager {
 	return &Manager{}
 }
 
-// FindCloudflared locates the cloudflared executable on the system
+func hasDevFlag(flagName, envName string) bool {
+	if os.Getenv(envName) == "1" || strings.EqualFold(os.Getenv(envName), "true") {
+		return true
+	}
+	for _, arg := range os.Args {
+		clean := strings.TrimLeft(arg, "-")
+		if idx := strings.Index(clean, "="); idx != -1 {
+			clean = clean[:idx]
+		}
+		if strings.EqualFold(clean, flagName) {
+			return true
+		}
+	}
+	return false
+}
+
+// FindCloudflared locates the cloudflared executable on the system,
+// prioritizing the version installed by the user on their machine.
 func FindCloudflared() (string, error) {
-	// 1. Check PATH
-	if path, err := exec.LookPath("cloudflared"); err == nil {
-		return path, nil
+	binName := "cloudflared"
+	if runtime.GOOS == "windows" {
+		binName = "cloudflared.exe"
 	}
 
-	// 2. Common Windows paths
-	commonPaths := []string{
-		`C:\Program Files (x86)\cloudflared\cloudflared.exe`,
-		`C:\Program Files\cloudflared\cloudflared.exe`,
-		filepath.Join(os.Getenv("LOCALAPPDATA"), `Microsoft\WinGet\Packages\Cloudflare.cloudflared\cloudflared.exe`),
-	}
-
-	for _, p := range commonPaths {
-		if _, err := os.Stat(p); err == nil {
+	// 0. Portable mode via portable.txt marker:
+	// In portable mode, we search ONLY in the portable folder (prioritizing bin/ subfolder).
+	// We ignore all local machine settings and installations.
+	if config.HasPortableMarker() {
+		dir := config.GetPortableDir()
+		p := filepath.Join(dir, "bin", binName)
+		if fileExists(p) {
 			return p, nil
+		}
+		p = filepath.Join(dir, binName)
+		if fileExists(p) {
+			return p, nil
+		}
+		return "", fmt.Errorf("cloudflared no encontrado en la carpeta bin (modo portable)")
+	}
+
+	// Dev flag: ignore system/local installations and look ONLY in AppData download folder
+	ignoreLocalInstall := hasDevFlag("ignore-local-install", "NO_BS_IGNORE_LOCAL_INSTALL")
+
+	if !ignoreLocalInstall {
+		// 1. Prioritize user's system PATH
+		if path, err := exec.LookPath(binName); err == nil {
+			if fileExists(path) {
+				return path, nil
+			}
+		}
+
+		// 2. Prioritize common user/system installation paths (WinGet, Program Files, Chocolatey, Scoop)
+		if runtime.GOOS == "windows" {
+			var commonPaths []string
+
+			// Program Files
+			commonPaths = append(commonPaths,
+				`C:\Program Files\cloudflared\cloudflared.exe`,
+				`C:\Program Files (x86)\cloudflared\cloudflared.exe`,
+			)
+
+			// WinGet
+			if localApp := os.Getenv("LOCALAPPDATA"); localApp != "" {
+				commonPaths = append(commonPaths,
+					filepath.Join(localApp, `Microsoft\WinGet\Packages\Cloudflare.cloudflared\cloudflared.exe`),
+				)
+			}
+
+			// Chocolatey
+			if progData := os.Getenv("PROGRAMDATA"); progData != "" {
+				commonPaths = append(commonPaths,
+					filepath.Join(progData, `chocolatey\bin\cloudflared.exe`),
+				)
+			}
+
+			// Scoop
+			if userProfile := os.Getenv("USERPROFILE"); userProfile != "" {
+				commonPaths = append(commonPaths,
+					filepath.Join(userProfile, `scoop\shims\cloudflared.exe`),
+				)
+			}
+
+			for _, p := range commonPaths {
+				if fileExists(p) {
+					return p, nil
+				}
+			}
+		}
+
+		// 3. Portable folder next to running executable
+		if dir, err := config.GetExeDir(); err == nil {
+			p := filepath.Join(dir, binName)
+			if fileExists(p) {
+				return p, nil
+			}
+			p = filepath.Join(dir, "bin", binName)
+			if fileExists(p) {
+				return p, nil
+			}
 		}
 	}
 
-	return "", fmt.Errorf("cloudflared no encontrado en PATH ni en rutas estándar")
+	// 4. App internal auto-download cache (%LOCALAPPDATA%\no-bs-transfer\bin\cloudflared.exe)
+	defaultPath := DefaultBinaryPath()
+	if fileExists(defaultPath) {
+		return defaultPath, nil
+	}
+
+	return "", fmt.Errorf("cloudflared no encontrado en el sistema")
 }
 
 // Start launches a quick tunnel pointing to the given local port
@@ -72,10 +168,7 @@ func (m *Manager) Start(port int) (string, error) {
 	m.cancel = cancel
 
 	cmd := exec.CommandContext(ctx, binPath, "tunnel", "--url", fmt.Sprintf("http://127.0.0.1:%d", port), "--no-autoupdate")
-	cmd.SysProcAttr = &syscall.SysProcAttr{
-		HideWindow:    true,
-		CreationFlags: 0x08000000, // CREATE_NO_WINDOW
-	}
+	prepareCmdPlatform(cmd)
 	m.cmd = cmd
 
 	stderr, err := cmd.StderrPipe()
@@ -97,10 +190,17 @@ func (m *Manager) Start(port int) (string, error) {
 	urlChan := make(chan string, 1)
 	errChan := make(chan error, 1)
 
+	var lastErrLine string
+	var errMu sync.Mutex
+
 	go func() {
 		scanner := bufio.NewScanner(stderr)
 		for scanner.Scan() {
 			line := scanner.Text()
+			errMu.Lock()
+			lastErrLine = line
+			errMu.Unlock()
+
 			if match := tunnelRegex.FindString(line); match != "" {
 				select {
 				case urlChan <- match:
@@ -136,6 +236,12 @@ func (m *Manager) Start(port int) (string, error) {
 		return "", fmt.Errorf("fallo al leer logs de cloudflared: %w", err)
 	case <-waitChan:
 		m.stopLocked()
+		errMu.Lock()
+		detail := lastErrLine
+		errMu.Unlock()
+		if detail != "" {
+			return "", fmt.Errorf("cloudflared se cerró inesperadamente: %s", detail)
+		}
 		return "", fmt.Errorf("cloudflared se cerró inesperadamente")
 	case <-time.After(30 * time.Second):
 		m.stopLocked()
@@ -171,9 +277,8 @@ func (m *Manager) stopLocked() {
 		select {
 		case <-waitChan:
 		case <-time.After(2 * time.Second):
-			// Safety fallback for Windows if process tree lingers
 			if m.cmd != nil && m.cmd.Process != nil {
-				_ = exec.Command("taskkill", "/T", "/F", "/PID", fmt.Sprintf("%d", m.cmd.Process.Pid)).Run()
+				killProcessTree(m.cmd.Process)
 			}
 		}
 	}
@@ -211,10 +316,7 @@ func (m *Manager) StartWithToken(token, publicDomain string) (string, error) {
 	m.cancel = cancel
 
 	cmd := exec.CommandContext(ctx, binPath, "tunnel", "run", "--token", token)
-	cmd.SysProcAttr = &syscall.SysProcAttr{
-		HideWindow:    true,
-		CreationFlags: 0x08000000,
-	}
+	prepareCmdPlatform(cmd)
 	m.cmd = cmd
 
 	stderr, err := cmd.StderrPipe()

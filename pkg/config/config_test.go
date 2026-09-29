@@ -1,6 +1,10 @@
 package config
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
 
 func TestCleanDomainHost(t *testing.T) {
 	tests := []struct {
@@ -73,6 +77,16 @@ func TestCleanDomainHost(t *testing.T) {
 			input:    "   ",
 			expected: "",
 		},
+		{
+			name:     "query params stripped",
+			input:    "https://transfer.midominio.com?foo=bar",
+			expected: "transfer.midominio.com",
+		},
+		{
+			name:     "hash fragment stripped",
+			input:    "https://transfer.midominio.com#section",
+			expected: "transfer.midominio.com",
+		},
 	}
 
 	for _, tc := range tests {
@@ -82,5 +96,74 @@ func TestCleanDomainHost(t *testing.T) {
 				t.Errorf("CleanDomainHost(%q) = %q; want %q", tc.input, got, tc.expected)
 			}
 		})
+	}
+}
+
+func TestGetAppDataConfigPath(t *testing.T) {
+	path := GetAppDataConfigPath()
+	if path == "" {
+		t.Fatal("expected non-empty config path")
+	}
+	if filepath.Base(path) != "config.json" {
+		t.Errorf("expected filename config.json, got %q", filepath.Base(path))
+	}
+}
+
+func TestPortableMarker(t *testing.T) {
+	tmpDir := t.TempDir()
+	SetExeDirOverride(tmpDir)
+	defer SetExeDirOverride("")
+
+	// Initially no portable.txt
+	if HasPortableMarker() {
+		t.Fatal("expected HasPortableMarker to be false initially")
+	}
+
+	// Create portable.txt
+	markerPath := filepath.Join(tmpDir, "portable.txt")
+	if err := os.WriteFile(markerPath, []byte("portable"), 0644); err != nil {
+		t.Fatalf("failed to create portable.txt: %v", err)
+	}
+
+	if !HasPortableMarker() {
+		t.Fatal("expected HasPortableMarker to be true after creating portable.txt")
+	}
+}
+
+func TestPortableLoadAndSave(t *testing.T) {
+	tmpDir := t.TempDir()
+	SetExeDirOverride(tmpDir)
+	defer SetExeDirOverride("")
+
+	// Create portable.txt
+	markerPath := filepath.Join(tmpDir, "portable.txt")
+	if err := os.WriteFile(markerPath, []byte(""), 0644); err != nil {
+		t.Fatalf("failed to create portable.txt: %v", err)
+	}
+
+	// Load should default to portable mode
+	cfg := Load()
+	if !cfg.SavePortable {
+		t.Errorf("expected SavePortable to be true with portable.txt")
+	}
+
+	// Save should write config.json in tmpDir
+	cfg.CustomDomain = "portable.test.com"
+	if err := Save(cfg); err != nil {
+		t.Fatalf("Save failed: %v", err)
+	}
+
+	localConfig := filepath.Join(tmpDir, "config.json")
+	if _, err := os.Stat(localConfig); err != nil {
+		t.Fatalf("expected config.json to exist at %q: %v", localConfig, err)
+	}
+
+	// Reload and verify
+	reloaded := Load()
+	if reloaded.CustomDomain != "portable.test.com" {
+		t.Errorf("expected custom domain %q, got %q", "portable.test.com", reloaded.CustomDomain)
+	}
+	if !reloaded.SavePortable {
+		t.Errorf("expected SavePortable to remain true")
 	}
 }

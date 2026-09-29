@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 )
@@ -19,19 +20,108 @@ type AppConfig struct {
 	WindowHeight    int    `json:"windowHeight,omitempty"`
 }
 
-var mu sync.RWMutex
+var (
+	configMu       sync.RWMutex
+	overrideMu     sync.RWMutex
+	exeDirOverride string
 
-// GetLocalConfigPath returns the path to config.json next to the executable
-func GetLocalConfigPath() (string, error) {
+	markerNames = []string{
+		"portable.txt",
+		"portable.txt.txt",
+		"portable",
+		"PORTABLE.TXT",
+		"PORTABLE",
+	}
+)
+
+// SetExeDirOverride allows overriding the executable directory (used for testing)
+func SetExeDirOverride(dir string) {
+	overrideMu.Lock()
+	defer overrideMu.Unlock()
+	exeDirOverride = dir
+}
+
+// GetExeDir returns the directory containing the running executable
+func GetExeDir() (string, error) {
+	overrideMu.RLock()
+	override := exeDirOverride
+	overrideMu.RUnlock()
+
+	if override != "" {
+		return override, nil
+	}
 	exePath, err := os.Executable()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(filepath.Dir(exePath), "config.json"), nil
+	if resolved, err := filepath.EvalSymlinks(exePath); err == nil {
+		exePath = resolved
+	}
+	return filepath.Dir(exePath), nil
 }
 
-// GetAppDataConfigPath returns the path to config.json in %APPDATA%
+func hasMarkerInDir(dir string) bool {
+	if dir == "" {
+		return false
+	}
+	for _, name := range markerNames {
+		p := filepath.Join(dir, name)
+		if info, err := os.Stat(p); err == nil && !info.IsDir() {
+			return true
+		}
+	}
+	return false
+}
+
+// HasPortableMarker checks if a portable marker file exists next to the executable
+// or in the current working directory.
+func HasPortableMarker() bool {
+	dir, err := GetExeDir()
+	if err == nil && hasMarkerInDir(dir) {
+		return true
+	}
+	if wd, err := os.Getwd(); err == nil && hasMarkerInDir(wd) {
+		return true
+	}
+	return false
+}
+
+// GetPortableDir returns the active directory for portable mode files
+func GetPortableDir() string {
+	dir, err := GetExeDir()
+	if err == nil && hasMarkerInDir(dir) {
+		return dir
+	}
+	if wd, err := os.Getwd(); err == nil && hasMarkerInDir(wd) {
+		return wd
+	}
+	if err == nil {
+		return dir
+	}
+	return "."
+}
+
+// GetLocalConfigPath returns the path to config.json for portable mode or next to executable
+func GetLocalConfigPath() (string, error) {
+	if HasPortableMarker() {
+		return filepath.Join(GetPortableDir(), "config.json"), nil
+	}
+	dir, err := GetExeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "config.json"), nil
+}
+
+// GetAppDataConfigPath returns the path to config.json in %LOCALAPPDATA% on Windows,
+// or UserConfigDir on other platforms.
 func GetAppDataConfigPath() string {
+	if runtime.GOOS == "windows" {
+		if localApp := os.Getenv("LOCALAPPDATA"); localApp != "" {
+			return filepath.Join(localApp, "no-bs-transfer", "config.json")
+		}
+	}
+
 	configDir, err := os.UserConfigDir()
 	if err != nil {
 		configDir = os.TempDir()
@@ -64,13 +154,22 @@ func CleanDomainHost(raw string) string {
 	if idx := strings.Index(raw, "/"); idx != -1 {
 		raw = raw[:idx]
 	}
+	if idx := strings.Index(raw, "?"); idx != -1 {
+		raw = raw[:idx]
+	}
+	if idx := strings.Index(raw, "#"); idx != -1 {
+		raw = raw[:idx]
+	}
 	return strings.TrimSpace(raw)
 }
 
-// Load reads the configuration from disk: first executable dir, then %APPDATA%
+// Load reads the configuration from disk:
+// 1. If portable mode is active (portable.txt marker), ONLY uses the portable folder and completely ignores %LOCALAPPDATA%.
+// 2. If a local config.json exists next to executable, it reads it.
+// 3. Otherwise, it uses %LOCALAPPDATA%\no-bs-transfer\config.json.
 func Load() *AppConfig {
-	mu.RLock()
-	defer mu.RUnlock()
+	configMu.RLock()
+	defer configMu.RUnlock()
 
 	defaultAppData := GetAppDataConfigPath()
 	cfg := &AppConfig{
@@ -83,7 +182,9 @@ func Load() *AppConfig {
 		WindowHeight:    720,
 	}
 
-	// 1. Check portable mode: next to executable
+	isPortable := HasPortableMarker()
+
+	// 1. Check portable mode / config next to executable
 	if localPath, err := GetLocalConfigPath(); err == nil {
 		if data, err := os.ReadFile(localPath); err == nil {
 			if err := json.Unmarshal(data, cfg); err == nil {
@@ -103,7 +204,14 @@ func Load() *AppConfig {
 		}
 	}
 
-	// 2. Default OS User Config directory (%APPDATA% on Windows, ~/.config on Linux)
+	// In portable mode: if config.json does not exist yet in the portable folder,
+	// return default configuration with SavePortable=true. Completely IGNORE %LOCALAPPDATA%.
+	if isPortable {
+		cfg.SavePortable = true
+		return cfg
+	}
+
+	// 2. Default LocalAppData directory (%LOCALAPPDATA%\no-bs-transfer\config.json)
 	if data, err := os.ReadFile(defaultAppData); err == nil {
 		if err := json.Unmarshal(data, cfg); err == nil {
 			cfg.SavePortable = false
@@ -126,8 +234,8 @@ func Load() *AppConfig {
 
 // Save writes the configuration to disk
 func Save(cfg *AppConfig) error {
-	mu.Lock()
-	defer mu.Unlock()
+	configMu.Lock()
+	defer configMu.Unlock()
 
 	// Clean domain: strip protocol, paths, and trailing slashes so it's always stored without https://
 	cfg.CustomDomain = CleanDomainHost(cfg.CustomDomain)
@@ -147,11 +255,12 @@ func Save(cfg *AppConfig) error {
 	localPath, localErr := GetLocalConfigPath()
 	appDataPath := GetAppDataConfigPath()
 
-	if cfg.SavePortable && localErr == nil {
+	if HasPortableMarker() || (cfg.SavePortable && localErr == nil) {
 		targetPath = localPath
+		cfg.SavePortable = true
 	} else {
 		targetPath = appDataPath
-		// If migrating from portable to AppData, clean up local file if exists
+		// If switching from portable to AppData, clean up local file if exists
 		if localErr == nil {
 			_ = os.Remove(localPath)
 		}

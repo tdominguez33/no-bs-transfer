@@ -10,7 +10,10 @@
     StopShare,
     CopyToClipboard,
     GetConfig,
-    SaveConfig
+    SaveConfig,
+    GetCloudflaredStatus,
+    DownloadCloudflared,
+    CancelCloudflaredDownload
   } from '../wailsjs/go/main/App';
   import { EventsOn, EventsOff, OnFileDrop, OnFileDropOff } from '../wailsjs/runtime/runtime';
   import type { transfer, main, config } from '../wailsjs/go/models';
@@ -37,7 +40,9 @@
     EyeOff,
     CornerDownLeft,
     ChevronUp,
-    ChevronDown
+    ChevronDown,
+    Download,
+    ShieldCheck
   } from '@lucide/svelte';
 
   interface GuestTransfer {
@@ -113,6 +118,56 @@
   let copiedMap = $state<Record<string, boolean>>({});
   let errorMessage = $state('');
 
+  // Cloudflared Component State
+  let cloudflaredStatus = $state<main.CloudflaredStatus>({
+    installed: false,
+    path: ''
+  });
+  let isDownloadingCloudflared = $state(false);
+  let cloudflaredDownloadProgress = $state({
+    show: false,
+    downloaded: 0,
+    total: 0,
+    percent: 0,
+    speed: 0
+  });
+
+  async function refreshCloudflaredStatus() {
+    try {
+      const res = await GetCloudflaredStatus();
+      if (res) {
+        cloudflaredStatus = res;
+      }
+    } catch (e) {
+      console.error('Error al consultar estado de cloudflared:', e);
+    }
+  }
+
+  async function handleStartCloudflaredDownload() {
+    isDownloadingCloudflared = true;
+    errorMessage = '';
+    try {
+      await DownloadCloudflared();
+      await refreshCloudflaredStatus();
+    } catch (err: any) {
+      errorMessage = err?.message || 'Error al descargar cloudflared';
+    } finally {
+      isDownloadingCloudflared = false;
+      cloudflaredDownloadProgress.show = false;
+    }
+  }
+
+  async function handleCancelCloudflaredDownload() {
+    try {
+      await CancelCloudflaredDownload();
+    } catch (err) {
+      console.error(err);
+    }
+    cloudflaredDownloadProgress.show = false;
+    isDownloadingCloudflared = false;
+    isStarting = false;
+  }
+
   // Live Stats
   let stats = $state<TransferStats>({
     totalSpeed: 0,
@@ -149,10 +204,10 @@
     str = str.replace(/^https?:+/i, '');
     str = str.replace(/^\/+/, '');
     str = str.replace(/\/+$/, '');
-    // Strip subpath after domain if present: domain.com/foo -> domain.com
-    const slashIdx = str.indexOf('/');
-    if (slashIdx !== -1) {
-      str = str.substring(0, slashIdx);
+    // Strip subpath, query parameters and hash fragments
+    const splitIdx = str.search(/[\/\?\#]/);
+    if (splitIdx !== -1) {
+      str = str.substring(0, splitIdx);
     }
     return str.trim();
   }
@@ -177,13 +232,15 @@
     configState.fixedPort = p;
   }
 
-  function validatePort() {
+  function validatePort(clampMin = true) {
     let p = Number(configState.fixedPort);
-    if (isNaN(p) || p < 1024) {
-      configState.fixedPort = 56789;
+    if (isNaN(p)) {
+      if (clampMin) configState.fixedPort = 56789;
     } else if (p > 65535) {
       configState.fixedPort = 65535;
-    } else {
+    } else if (clampMin && p < 1024) {
+      configState.fixedPort = 56789;
+    } else if (!isNaN(p)) {
       configState.fixedPort = Math.round(p);
     }
   }
@@ -249,9 +306,11 @@
       clearTimeout(autoSaveTimer);
       autoSaveTimer = null;
     }
-    validatePort();
+    validatePort(false);
+    const portVal = Number(configState.fixedPort);
     const toSave = {
       ...configState,
+      fixedPort: isNaN(portVal) || portVal < 1024 ? 56789 : Math.round(portVal),
       customDomain: cleanDomainInput(configState.customDomain)
     };
     const currentJSON = JSON.stringify({
@@ -343,6 +402,38 @@
       isSharing = false;
       shareResult = null;
     });
+
+    refreshCloudflaredStatus();
+
+    EventsOn('cloudflared_download_progress', (p: { downloaded: number; total: number; percent: number; speed: number; done: boolean; error?: string }) => {
+      if (p.error) {
+        if (!p.error.toLowerCase().includes('cancel')) {
+          errorMessage = 'Fallo al descargar componente de túnel: ' + p.error;
+        }
+        cloudflaredDownloadProgress.show = false;
+        isDownloadingCloudflared = false;
+        return;
+      }
+      if (p.done) {
+        cloudflaredDownloadProgress.percent = 100;
+        cloudflaredDownloadProgress.downloaded = p.downloaded;
+        cloudflaredDownloadProgress.total = p.total;
+        setTimeout(() => {
+          cloudflaredDownloadProgress.show = false;
+          isDownloadingCloudflared = false;
+          refreshCloudflaredStatus();
+        }, 400);
+        return;
+      }
+      isDownloadingCloudflared = true;
+      cloudflaredDownloadProgress = {
+        show: true,
+        downloaded: p.downloaded,
+        total: p.total,
+        percent: Math.min(100, Math.max(0, p.percent)),
+        speed: p.speed
+      };
+    });
   });
 
   onDestroy(() => {
@@ -354,6 +445,7 @@
     OnFileDropOff();
     EventsOff('transfer_update');
     EventsOff('share_stopped');
+    EventsOff('cloudflared_download_progress');
     window.removeEventListener('dragover', handleGlobalDragOver);
     window.removeEventListener('dragenter', handleGlobalDragOver);
     window.removeEventListener('drop', handleGlobalDrop);
@@ -406,13 +498,8 @@
     }
   }
 
-  function handleItemDragEnter(e: DragEvent, targetId: string) {
-    if (!draggedFileId) return;
-    e.preventDefault();
-    if (e.dataTransfer) {
-      e.dataTransfer.dropEffect = 'move';
-    }
-    if (targetId === draggedFileId) return;
+  function handleDragReorder(targetId: string) {
+    if (!draggedFileId || targetId === draggedFileId) return;
 
     const fromIndex = files.findIndex(f => f.id === draggedFileId);
     const toIndex = files.findIndex(f => f.id === targetId);
@@ -425,23 +512,22 @@
     }
   }
 
+  function handleItemDragEnter(e: DragEvent, targetId: string) {
+    if (!draggedFileId) return;
+    e.preventDefault();
+    if (e.dataTransfer) {
+      e.dataTransfer.dropEffect = 'move';
+    }
+    handleDragReorder(targetId);
+  }
+
   function handleItemDragOver(e: DragEvent, targetId: string) {
     if (!draggedFileId) return;
     e.preventDefault();
     if (e.dataTransfer) {
       e.dataTransfer.dropEffect = 'move';
     }
-    if (targetId === draggedFileId) return;
-
-    const fromIndex = files.findIndex(f => f.id === draggedFileId);
-    const toIndex = files.findIndex(f => f.id === targetId);
-
-    if (fromIndex !== -1 && toIndex !== -1 && fromIndex !== toIndex) {
-      const reordered = [...files];
-      const [moved] = reordered.splice(fromIndex, 1);
-      reordered.splice(toIndex, 0, moved);
-      files = reordered;
-    }
+    handleDragReorder(targetId);
   }
 
   function handleListContainerDragOver(e: DragEvent) {
@@ -597,8 +683,8 @@
         files = [];
       } else {
         shareResult = updatedResult;
-        const remainingNames = new Set(updatedResult.files.map(f => f.name));
-        files = files.filter(f => remainingNames.has(f.name));
+        const remainingIDs = new Set(updatedResult.files.map(f => f.id));
+        files = files.filter(f => remainingIDs.has(f.id));
       }
     } catch (err: any) {
       errorMessage = err?.message || 'Error al eliminar el archivo de la sesión';
@@ -607,12 +693,18 @@
     }
   }
 
+  let copyFeedbackTimers: Record<string, any> = {};
+
   async function copyText(key: string, text: string) {
     if (!text) return;
     await CopyToClipboard(text);
     copiedMap[key] = true;
-    setTimeout(() => {
+    if (copyFeedbackTimers[key]) {
+      clearTimeout(copyFeedbackTimers[key]);
+    }
+    copyFeedbackTimers[key] = setTimeout(() => {
       copiedMap[key] = false;
+      delete copyFeedbackTimers[key];
     }, 2000);
   }
 
@@ -646,7 +738,7 @@
 
   function formatDisplayUrl(url: string): string {
     if (!url) return '';
-    return url.replace(/^https?:\/\//i, '');
+    return url.replace(/^https?:\/\//i, '').replace(/\/+$/, '');
   }
 
   let totalBundleSize = $derived.by(() => {
@@ -672,7 +764,7 @@
           no-bs-transfer
         </h1>
         <span class="text-xs px-2 py-0.5 rounded-md font-mono {isSharing ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20' : 'bg-zinc-100 dark:bg-zinc-900 text-zinc-500 dark:text-zinc-400 border border-zinc-200 dark:border-zinc-800'}">
-          {isSharing ? 'túnel activo' : 'tunel inactivo'}
+          {isSharing ? 'túnel activo' : 'túnel inactivo'}
         </span>
       </div>
 
@@ -754,7 +846,72 @@
               </div>
             {/if}
 
-            <!-- Section 1: Custom Domain -->
+            <!-- Section 1: Cloudflare Tunnel Component (cloudflared) -->
+            <div class="border border-zinc-200 dark:border-zinc-800 rounded-xl bg-white dark:bg-zinc-900/40 p-5 flex flex-col gap-3 shrink-0 transition-colors">
+              <div class="flex items-start justify-between gap-4">
+                <div class="flex flex-col gap-1 flex-1">
+                  <div class="flex items-center gap-2">
+                    <ShieldCheck class="w-4 h-4 text-zinc-600 dark:text-zinc-400" />
+                    <h3 class="text-xs font-semibold tracking-wider text-zinc-900 dark:text-zinc-100">
+                      Componente de Túnel (Cloudflared)
+                    </h3>
+                  </div>
+                  <p class="text-xs text-zinc-500 dark:text-zinc-400 leading-relaxed">
+                    Motor responsable de generar los enlaces públicos y cifrados de Cloudflare.
+                  </p>
+                </div>
+
+                <!-- Status Badge -->
+                <div class="shrink-0">
+                  {#if cloudflaredStatus.installed}
+                    <span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium bg-emerald-50 dark:bg-emerald-950/40 text-emerald-600 dark:text-emerald-400 border border-emerald-200 dark:border-emerald-900/60 font-mono">
+                      <span class="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>
+                      Instalado
+                    </span>
+                  {:else}
+                    <span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium bg-amber-50 dark:bg-amber-950/40 text-amber-600 dark:text-amber-400 border border-amber-200 dark:border-amber-900/60 font-mono">
+                      <span class="w-1.5 h-1.5 rounded-full bg-amber-500"></span>
+                      No detectado
+                    </span>
+                  {/if}
+                </div>
+              </div>
+
+              {#if cloudflaredStatus.installed}
+                <div class="mt-1 p-2.5 rounded-lg bg-zinc-50 dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 text-[11px] font-mono text-zinc-600 dark:text-zinc-400 break-all flex items-center justify-between gap-2">
+                  <span class="truncate">{cloudflaredStatus.path}</span>
+                  <button
+                    type="button"
+                    onclick={() => copyText('cloudflared_path', cloudflaredStatus.path)}
+                    class="p-1 text-zinc-500 hover:text-zinc-700 dark:text-zinc-400 dark:hover:text-zinc-200 transition-colors cursor-pointer shrink-0"
+                    title="Copiar ruta"
+                  >
+                    {#if copiedMap['cloudflared_path']}
+                      <Check class="w-3.5 h-3.5 text-zinc-800 dark:text-zinc-100" />
+                    {:else}
+                      <Copy class="w-3.5 h-3.5" />
+                    {/if}
+                  </button>
+                </div>
+              {:else}
+                <div class="mt-1 flex items-center justify-between gap-3 p-3 rounded-lg bg-zinc-50 dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800">
+                  <span class="text-xs text-zinc-500 dark:text-zinc-400">
+                    Se descargará de forma automática al iniciar el primer túnel.
+                  </span>
+                  <button
+                    type="button"
+                    disabled={isDownloadingCloudflared}
+                    onclick={handleStartCloudflaredDownload}
+                    class="px-3 py-1.5 bg-zinc-900 hover:bg-zinc-800 dark:bg-zinc-100 dark:hover:bg-zinc-200 text-white dark:text-zinc-900 rounded-lg text-xs font-medium transition-colors flex items-center gap-1.5 cursor-pointer disabled:opacity-50 shrink-0"
+                  >
+                    <Download class="w-3.5 h-3.5" />
+                    <span>Descargar ahora</span>
+                  </button>
+                </div>
+              {/if}
+            </div>
+
+            <!-- Section 2: Custom Domain -->
             <div class="border border-zinc-200 dark:border-zinc-800 rounded-xl bg-white dark:bg-zinc-900/40 p-5 flex flex-col gap-0 shrink-0 transition-colors">
               <div class="flex items-start justify-between gap-4">
                 <!-- svelte-ignore a11y_click_events_have_key_events -->
@@ -1470,6 +1627,76 @@
                 <Trash2 class="w-3.5 h-3.5" />
                 <span>Eliminar</span>
               {/if}
+            </button>
+          </div>
+        </div>
+      </div>
+    {/if}
+
+    <!-- Cloudflared Download Modal Dialog -->
+    {#if cloudflaredDownloadProgress.show}
+      <!-- svelte-ignore a11y_click_events_have_key_events -->
+      <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-label="Descargando Cloudflared"
+        tabindex="-1"
+        class="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4 z-50 select-none overflow-hidden"
+      >
+        <div
+          class="bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-2xl shadow-2xl p-5 max-w-sm w-full flex flex-col gap-4 animate-in fade-in zoom-in-95 duration-150"
+        >
+          <!-- Header -->
+          <div class="flex items-start gap-3.5">
+            <div class="w-10 h-10 rounded-full bg-blue-50 dark:bg-blue-950/50 border border-blue-200 dark:border-blue-900/40 flex items-center justify-center text-blue-600 dark:text-blue-400 shrink-0">
+              <Download class="w-5 h-5" />
+            </div>
+            <div class="min-w-0 flex-1">
+              <h3 class="text-sm font-semibold text-zinc-900 dark:text-zinc-100 mb-1">
+                Descargando Cloudflare Tunnel
+              </h3>
+              <p class="text-xs text-zinc-500 dark:text-zinc-400 leading-relaxed">
+                Requerido para generar el túnel público. Solo se descarga la primera vez.
+              </p>
+            </div>
+          </div>
+
+          <!-- Progress Bar & Statistics -->
+          <div class="flex flex-col gap-2 pt-1">
+            <!-- Barra de progreso -->
+            <div class="w-full bg-zinc-100 dark:bg-zinc-800 rounded-full h-3 overflow-hidden p-0.5 border border-zinc-200 dark:border-zinc-700">
+              <div
+                class="bg-emerald-500 dark:bg-emerald-400 h-full rounded-full transition-all duration-150 ease-out"
+                style="width: {cloudflaredDownloadProgress.percent}%;"
+              ></div>
+            </div>
+
+            <!-- Datos de progreso -->
+            <div class="flex items-center justify-between text-xs text-zinc-500 dark:text-zinc-400 font-mono">
+              <div class="flex items-center gap-1 font-medium text-zinc-700 dark:text-zinc-300">
+                <span class="font-bold">{cloudflaredDownloadProgress.percent.toFixed(0)}%</span>
+                {#if cloudflaredDownloadProgress.total > 0}
+                  <span class="text-zinc-400 font-normal">({formatBytes(cloudflaredDownloadProgress.downloaded)} / {formatBytes(cloudflaredDownloadProgress.total)})</span>
+                {:else}
+                  <span class="text-zinc-400 font-normal">({formatBytes(cloudflaredDownloadProgress.downloaded)})</span>
+                {/if}
+              </div>
+              <div>
+                {#if cloudflaredDownloadProgress.speed > 0}
+                  <span>{formatSpeed(cloudflaredDownloadProgress.speed)}</span>
+                {/if}
+              </div>
+            </div>
+          </div>
+
+          <!-- Footer Buttons -->
+          <div class="flex items-center justify-end gap-2 pt-1 border-t border-zinc-100 dark:border-zinc-800">
+            <button
+              onclick={handleCancelCloudflaredDownload}
+              class="px-3.5 py-1.5 border border-zinc-200 dark:border-zinc-700 hover:bg-zinc-100 dark:hover:bg-zinc-800 text-zinc-700 dark:text-zinc-300 font-medium rounded-lg text-xs transition-colors cursor-pointer"
+            >
+              Cancelar
             </button>
           </div>
         </div>

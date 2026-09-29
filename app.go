@@ -3,9 +3,9 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"math/big"
-	"net"
 	"os"
 	"sync"
 	"time"
@@ -34,15 +34,23 @@ type MultiShareResult struct {
 	TotalSize     string          `json:"totalSize"`
 }
 
+// CloudflaredStatus represents the installation status of cloudflared
+type CloudflaredStatus struct {
+	Installed bool   `json:"installed"`
+	Path      string `json:"path"`
+}
+
 // App struct
 type App struct {
-	ctx           context.Context
-	tunnelManager *tunnel.Manager
-	server        *transfer.Server
-	mu            sync.Mutex
-	activeFiles   []*transfer.SharedFile
-	bundleCode    string
-	usedCodes     map[string]bool
+	ctx            context.Context
+	tunnelManager  *tunnel.Manager
+	server         *transfer.Server
+	mu             sync.Mutex
+	activeFiles    []*transfer.SharedFile
+	bundleCode     string
+	usedCodes      map[string]bool
+	downloadCancel context.CancelFunc
+	downloadMu     sync.Mutex
 }
 
 // NewApp creates a new App application struct
@@ -99,6 +107,80 @@ func (a *App) SaveConfig(cfg *config.AppConfig) error {
 		cfg.WindowHeight = existing.WindowHeight
 	}
 	return config.Save(cfg)
+}
+
+// GetCloudflaredStatus returns whether cloudflared is installed and its binary path
+func (a *App) GetCloudflaredStatus() *CloudflaredStatus {
+	path, err := tunnel.FindCloudflared()
+	if err != nil {
+		return &CloudflaredStatus{
+			Installed: false,
+			Path:      "",
+		}
+	}
+	return &CloudflaredStatus{
+		Installed: true,
+		Path:      path,
+	}
+}
+
+// CancelCloudflaredDownload cancels any ongoing cloudflared download
+func (a *App) CancelCloudflaredDownload() {
+	a.downloadMu.Lock()
+	defer a.downloadMu.Unlock()
+	if a.downloadCancel != nil {
+		a.downloadCancel()
+		a.downloadCancel = nil
+	}
+}
+
+// EnsureCloudflared verifies if cloudflared is available; if not, downloads it with progress updates
+func (a *App) EnsureCloudflared() (string, error) {
+	if path, err := tunnel.FindCloudflared(); err == nil {
+		return path, nil
+	}
+
+	a.downloadMu.Lock()
+	if a.downloadCancel != nil {
+		a.downloadCancel()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	a.downloadCancel = cancel
+	a.downloadMu.Unlock()
+
+	defer func() {
+		a.downloadMu.Lock()
+		a.downloadCancel = nil
+		a.downloadMu.Unlock()
+	}()
+
+	path, err := tunnel.DownloadCloudflared(ctx, func(p tunnel.DownloadProgress) {
+		if a.ctx != nil {
+			wailsRuntime.EventsEmit(a.ctx, "cloudflared_download_progress", p)
+		}
+	})
+
+	if err != nil {
+		errMsg := err.Error()
+		if errors.Is(err, context.Canceled) {
+			errMsg = "Descarga cancelada"
+		}
+		if a.ctx != nil {
+			wailsRuntime.EventsEmit(a.ctx, "cloudflared_download_progress", tunnel.DownloadProgress{
+				Done:  true,
+				Error: errMsg,
+			})
+		}
+		return "", fmt.Errorf("error al descargar cloudflared: %w", err)
+	}
+
+	return path, nil
+}
+
+// DownloadCloudflared manually initiates the cloudflared download (e.g. from Settings)
+func (a *App) DownloadCloudflared() error {
+	_, err := a.EnsureCloudflared()
+	return err
 }
 
 // SelectFiles opens native Windows file dialog allowing multiple selection
@@ -164,12 +246,26 @@ func generate6DigitCode(existing map[string]bool) string {
 
 // StartShare initiates the local server and Cloudflare tunnel for multiple files
 func (a *App) StartShare(files []*transfer.SharedFile) (*MultiShareResult, error) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-
-	if len(files) == 0 {
+	seenPaths := make(map[string]bool)
+	var uniqueFiles []*transfer.SharedFile
+	for _, f := range files {
+		if f != nil && f.Path != "" && !seenPaths[f.Path] {
+			seenPaths[f.Path] = true
+			uniqueFiles = append(uniqueFiles, f)
+		}
+	}
+	if len(uniqueFiles) == 0 {
 		return nil, fmt.Errorf("no hay archivos para compartir")
 	}
+	files = uniqueFiles
+
+	// 1. Ensure cloudflared is ready (downloads with progress if missing)
+	if _, err := a.EnsureCloudflared(); err != nil {
+		return nil, err
+	}
+
+	a.mu.Lock()
+	defer a.mu.Unlock()
 
 	// Stop any existing share
 	if a.server != nil {
@@ -410,32 +506,5 @@ func formatBytes(b int64) string {
 }
 
 func getLocalIPs(port int) []string {
-	var ips []string
-	ifaces, err := net.Interfaces()
-	if err != nil {
-		return ips
-	}
-
-	for _, iface := range ifaces {
-		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
-			continue
-		}
-		addrs, err := iface.Addrs()
-		if err != nil {
-			continue
-		}
-		for _, addr := range addrs {
-			var ip net.IP
-			switch v := addr.(type) {
-			case *net.IPNet:
-				ip = v.IP
-			case *net.IPAddr:
-				ip = v.IP
-			}
-			if ip != nil && ip.To4() != nil && !ip.IsLoopback() {
-				ips = append(ips, fmt.Sprintf("http://%s:%d", ip.String(), port))
-			}
-		}
-	}
-	return ips
+	return []string{fmt.Sprintf("http://127.0.0.1:%d", port)}
 }

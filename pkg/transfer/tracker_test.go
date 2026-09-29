@@ -121,3 +121,45 @@ func TestTrackerCancelledTimeout(t *testing.T) {
 		t.Fatalf("expected status to transition to cancelled after timeout, got %s", status)
 	}
 }
+
+func TestTrackerMultiConnectionRange(t *testing.T) {
+	tracker := NewTracker(nil)
+	defer tracker.Stop()
+
+	// Connection 1 starts at byte 0
+	gt1 := tracker.StartTransfer("guest_multi", "file_multi", "movie.mp4", 1000, "127.0.0.1", "aria2/1.36.0", 0)
+	tracker.AddBytes(gt1.ID, 150)
+	if atomic.LoadInt64(&gt1.BytesSent) != 150 {
+		t.Fatalf("expected 150 bytes, got %d", atomic.LoadInt64(&gt1.BytesSent))
+	}
+
+	// Concurrent Connection 2 opens at offset 500 while Connection 1 is still active
+	gt2 := tracker.StartTransfer("guest_multi", "file_multi", "movie.mp4", 1000, "127.0.0.1", "aria2/1.36.0", 500)
+	if gt1 != gt2 {
+		t.Fatal("expected gt1 and gt2 to reference same transfer instance")
+	}
+
+	// BytesSent must NOT be reset to 500
+	if atomic.LoadInt64(&gt2.BytesSent) != 150 {
+		t.Fatalf("expected BytesSent to remain 150, got %d", atomic.LoadInt64(&gt2.BytesSent))
+	}
+
+	// Connection 2 adds 200 bytes
+	tracker.AddBytes(gt2.ID, 200)
+	if atomic.LoadInt64(&gt2.BytesSent) != 350 {
+		t.Fatalf("expected 350 bytes, got %d", atomic.LoadInt64(&gt2.BytesSent))
+	}
+
+	// Connection 1 closes
+	tracker.OnConnectionClosed(gt1.ID)
+	// Status should still be downloading because Connection 2 is active!
+	if gt2.Status != "downloading" {
+		t.Fatalf("expected status to remain downloading while connection 2 is active, got %s", gt2.Status)
+	}
+
+	// Connection 2 closes
+	tracker.OnConnectionClosed(gt2.ID)
+	if gt2.Status != "paused" {
+		t.Fatalf("expected status paused after all connections closed, got %s", gt2.Status)
+	}
+}

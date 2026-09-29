@@ -96,23 +96,25 @@ func (t *Tracker) StartTransfer(guestID, fileID, fileName string, fileSize int64
 	gt.UserAgent = userAgent
 	gt.LastActive = time.Now()
 	gt.Status = "downloading"
-	atomic.AddInt32(&gt.activeConns, 1)
+	activeBefore := atomic.AddInt32(&gt.activeConns, 1) - 1
 
-	if startOffset <= 0 {
-		atomic.StoreInt64(&gt.BytesSent, 0)
-		gt.lastBytes = 0
-		gt.Progress = 0
-		gt.Speed = 0
-		gt.ConnectedAt = time.Now()
-	} else {
-		atomic.StoreInt64(&gt.BytesSent, startOffset)
-		gt.lastBytes = startOffset
-		if gt.TotalBytes > 0 {
-			pct := float64(startOffset) / float64(gt.TotalBytes) * 100
-			if pct > 100 {
-				pct = 100
+	if activeBefore == 0 {
+		if startOffset <= 0 {
+			atomic.StoreInt64(&gt.BytesSent, 0)
+			gt.lastBytes = 0
+			gt.Progress = 0
+			gt.Speed = 0
+			gt.ConnectedAt = time.Now()
+		} else {
+			atomic.StoreInt64(&gt.BytesSent, startOffset)
+			gt.lastBytes = startOffset
+			if gt.TotalBytes > 0 {
+				pct := float64(startOffset) / float64(gt.TotalBytes) * 100
+				if pct > 100 {
+					pct = 100
+				}
+				gt.Progress = pct
 			}
-			gt.Progress = pct
 		}
 	}
 
@@ -140,11 +142,12 @@ func (t *Tracker) OnConnectionClosed(key string) {
 	}
 
 	if remaining == 0 {
+		curBytes := atomic.LoadInt64(&gt.BytesSent)
 		gt.Speed = 0
-		gt.lastBytes = atomic.LoadInt64(&gt.BytesSent)
+		gt.lastBytes = curBytes
 		gt.LastActive = time.Now()
 
-		if (gt.TotalBytes == 0 || gt.BytesSent >= gt.TotalBytes) && gt.TotalBytes >= 0 {
+		if (gt.TotalBytes == 0 || curBytes >= gt.TotalBytes) && gt.TotalBytes >= 0 {
 			gt.Status = "completed"
 			gt.Progress = 100
 		} else if gt.Status != "completed" {
@@ -163,17 +166,17 @@ func (t *Tracker) AddBytes(key string, n int64) {
 	t.mu.Lock()
 	gt, exists := t.transfers[key]
 	if exists {
-		atomic.AddInt64(&gt.BytesSent, n)
+		sent := atomic.AddInt64(&gt.BytesSent, n)
 		atomic.AddInt64(&t.totalBytesSent, n)
 		gt.LastActive = time.Now()
 
 		if gt.TotalBytes > 0 {
-			pct := float64(gt.BytesSent) / float64(gt.TotalBytes) * 100
+			pct := float64(sent) / float64(gt.TotalBytes) * 100
 			if pct > 100 {
 				pct = 100
 			}
 			gt.Progress = pct
-			if gt.BytesSent >= gt.TotalBytes {
+			if sent >= gt.TotalBytes {
 				gt.Status = "completed"
 			} else {
 				gt.Status = "downloading"
@@ -211,6 +214,7 @@ func (t *Tracker) collectStatsLocked() TransferStats {
 			activeCount++
 		}
 		clone := *gt
+		clone.BytesSent = atomic.LoadInt64(&gt.BytesSent)
 		list = append(list, &clone)
 	}
 
@@ -269,7 +273,7 @@ func (t *Tracker) speedLoop() {
 					gt.lastBytes = curBytes
 
 					if gt.Status == "downloading" {
-						if gt.TotalBytes > 0 && gt.BytesSent >= gt.TotalBytes {
+						if gt.TotalBytes > 0 && curBytes >= gt.TotalBytes {
 							gt.Status = "completed"
 							gt.Progress = 100
 						} else {
@@ -305,10 +309,16 @@ func parseDevice(ua string) string {
 		return "Windows"
 	case strings.Contains(low, "linux"):
 		return "Linux"
+	case strings.Contains(low, "aria2"):
+		return "aria2"
 	case strings.Contains(low, "curl"):
 		return "curl"
 	case strings.Contains(low, "wget"):
 		return "wget"
+	case strings.Contains(low, "python"):
+		return "Python"
+	case strings.Contains(low, "powershell"):
+		return "PowerShell"
 	default:
 		return "Navegador"
 	}

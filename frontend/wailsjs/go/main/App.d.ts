@@ -6,7 +6,15 @@ import {config} from '../models';
 
 export function AddFilesToShare(arg1:Array<transfer.SharedFile>):Promise<main.MultiShareResult>;
 
+export function CancelCloudflaredDownload():Promise<void>;
+
 export function CopyToClipboard(arg1:string):Promise<void>;
+
+export function DownloadCloudflared():Promise<void>;
+
+export function EnsureCloudflared():Promise<string>;
+
+export function GetCloudflaredStatus():Promise<main.CloudflaredStatus>;
 
 export function GetConfig():Promise<config.AppConfig>;
 

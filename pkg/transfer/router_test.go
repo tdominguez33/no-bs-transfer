@@ -81,4 +81,12 @@ func TestHandleRouter(t *testing.T) {
 	if rr404.Code != http.StatusNotFound {
 		t.Errorf("expected non-existent code to return 404, got %d", rr404.Code)
 	}
+
+	// 6. Unsupported HTTP methods (POST, PUT, DELETE) return 405 Method Not Allowed
+	reqPost := httptest.NewRequest("POST", "/"+bundleCode, nil)
+	rrPost := httptest.NewRecorder()
+	srv.handleRouter(rrPost, reqPost)
+	if rrPost.Code != http.StatusMethodNotAllowed {
+		t.Errorf("expected POST to return 405, got %d", rrPost.Code)
+	}
 }
