@@ -51,3 +51,42 @@ func TestIgnoreLocalInstallDevFlag(t *testing.T) {
 		}
 	}
 }
+
+func TestIsValidTunnelURL(t *testing.T) {
+	tests := []struct {
+		url      string
+		expected bool
+	}{
+		{"https://funny-cat-123.trycloudflare.com", true},
+		{"https://abc-def.trycloudflare.com", true},
+		{"https://api.trycloudflare.com", false},
+		{"http://api.trycloudflare.com", false},
+		{"", false},
+	}
+
+	for _, tc := range tests {
+		got := isValidTunnelURL(tc.url)
+		if got != tc.expected {
+			t.Errorf("isValidTunnelURL(%q) = %v; want %v", tc.url, got, tc.expected)
+		}
+	}
+}
+
+func TestShouldForceHTTP2(t *testing.T) {
+	if ShouldForceHTTP2() {
+		t.Error("expected false when not set")
+	}
+
+	t.Setenv("NO_BS_FORCE_HTTP2", "1")
+	if !ShouldForceHTTP2() {
+		t.Error("expected true when NO_BS_FORCE_HTTP2 is 1")
+	}
+
+	t.Setenv("NO_BS_FORCE_HTTP2", "")
+	t.Setenv("NO_BS_HTTP2", "true")
+	if !ShouldForceHTTP2() {
+		t.Error("expected true when NO_BS_HTTP2 is true")
+	}
+}
+
+

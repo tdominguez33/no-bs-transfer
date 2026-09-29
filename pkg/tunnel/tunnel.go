@@ -18,6 +18,18 @@ import (
 
 var tunnelRegex = regexp.MustCompile(`https://[a-zA-Z0-9-]+\.trycloudflare\.com`)
 
+// isValidTunnelURL checks if the detected URL is a legitimate ephemeral tunnel endpoint
+// and not Cloudflare's management API URL (api.trycloudflare.com).
+func isValidTunnelURL(u string) bool {
+	if u == "" {
+		return false
+	}
+	if strings.HasPrefix(u, "https://api.trycloudflare.com") || strings.HasPrefix(u, "http://api.trycloudflare.com") {
+		return false
+	}
+	return true
+}
+
 // fileExists checks if a file exists, is not a directory, and has non-zero size
 func fileExists(path string) bool {
 	info, err := os.Stat(path)
@@ -45,14 +57,25 @@ func hasDevFlag(flagName, envName string) bool {
 	}
 	for _, arg := range os.Args {
 		clean := strings.TrimLeft(arg, "-")
+		val := ""
 		if idx := strings.Index(clean, "="); idx != -1 {
+			val = clean[idx+1:]
 			clean = clean[:idx]
 		}
 		if strings.EqualFold(clean, flagName) {
-			return true
+			if val == "" || val == "1" || strings.EqualFold(val, "true") {
+				return true
+			}
+			return false
 		}
 	}
 	return false
+}
+
+// ShouldForceHTTP2 checks if HTTP/2 protocol is forced via CLI flag (--force-http2 / --http2)
+// or environment variable (NO_BS_FORCE_HTTP2 / NO_BS_HTTP2).
+func ShouldForceHTTP2() bool {
+	return hasDevFlag("force-http2", "NO_BS_FORCE_HTTP2") || hasDevFlag("http2", "NO_BS_HTTP2")
 }
 
 // FindCloudflared locates the cloudflared executable on the system,
@@ -150,26 +173,12 @@ func FindCloudflared() (string, error) {
 	return "", fmt.Errorf("cloudflared no encontrado en el sistema")
 }
 
-// Start launches a quick tunnel pointing to the given local port
-func (m *Manager) Start(port int) (string, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	if m.running {
-		return m.publicURL, nil
-	}
-
-	binPath, err := FindCloudflared()
-	if err != nil {
-		return "", err
-	}
-
+// startAttempt tries to launch cloudflared with the specified CLI arguments.
+func (m *Manager) startAttempt(binPath string, args []string, timeout time.Duration) (string, error) {
 	ctx, cancel := context.WithCancel(context.Background())
-	m.cancel = cancel
 
-	cmd := exec.CommandContext(ctx, binPath, "tunnel", "--url", fmt.Sprintf("http://127.0.0.1:%d", port), "--no-autoupdate")
+	cmd := exec.CommandContext(ctx, binPath, args...)
 	prepareCmdPlatform(cmd)
-	m.cmd = cmd
 
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
@@ -182,11 +191,7 @@ func (m *Manager) Start(port int) (string, error) {
 		return "", fmt.Errorf("error al iniciar cloudflared: %w", err)
 	}
 
-	m.running = true
 	waitChan := make(chan struct{})
-	m.waitChan = waitChan
-
-	// Channel to receive the detected tunnel URL
 	urlChan := make(chan string, 1)
 	errChan := make(chan error, 1)
 
@@ -201,7 +206,7 @@ func (m *Manager) Start(port int) (string, error) {
 			lastErrLine = line
 			errMu.Unlock()
 
-			if match := tunnelRegex.FindString(line); match != "" {
+			if match := tunnelRegex.FindString(line); match != "" && isValidTunnelURL(match) {
 				select {
 				case urlChan <- match:
 				default:
@@ -216,26 +221,38 @@ func (m *Manager) Start(port int) (string, error) {
 		}
 	}()
 
-	// Single goroutine waits for the command to terminate
 	go func() {
 		_ = cmd.Wait()
 		close(waitChan)
-		m.mu.Lock()
-		m.running = false
-		m.publicURL = ""
-		m.mu.Unlock()
 	}()
 
-	// Wait up to 30 seconds for Cloudflare to assign an ephemeral URL
 	select {
 	case url := <-urlChan:
+		m.cmd = cmd
+		m.cancel = cancel
+		m.running = true
+		m.waitChan = waitChan
 		m.publicURL = url
+		go func() {
+			<-waitChan
+			m.mu.Lock()
+			m.running = false
+			m.publicURL = ""
+			m.mu.Unlock()
+		}()
 		return url, nil
 	case err := <-errChan:
-		m.stopLocked()
+		cancel()
+		if cmd.Process != nil {
+			killProcessTree(cmd.Process)
+		}
+		select {
+		case <-waitChan:
+		case <-time.After(1 * time.Second):
+		}
 		return "", fmt.Errorf("fallo al leer logs de cloudflared: %w", err)
 	case <-waitChan:
-		m.stopLocked()
+		cancel()
 		errMu.Lock()
 		detail := lastErrLine
 		errMu.Unlock()
@@ -243,10 +260,58 @@ func (m *Manager) Start(port int) (string, error) {
 			return "", fmt.Errorf("cloudflared se cerró inesperadamente: %s", detail)
 		}
 		return "", fmt.Errorf("cloudflared se cerró inesperadamente")
-	case <-time.After(30 * time.Second):
-		m.stopLocked()
+	case <-time.After(timeout):
+		cancel()
+		if cmd.Process != nil {
+			killProcessTree(cmd.Process)
+		}
+		select {
+		case <-waitChan:
+		case <-time.After(1 * time.Second):
+		}
 		return "", fmt.Errorf("tiempo de espera agotado esperando la URL de Cloudflare")
 	}
+}
+
+// Start launches a quick tunnel pointing to the given local port.
+// If standard QUIC protocol fails or is blocked, it retries automatically using HTTP/2 over TCP.
+// When ShouldForceHTTP2() is active, it directly connects via HTTP/2 without trying QUIC first.
+func (m *Manager) Start(port int) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.running {
+		return m.publicURL, nil
+	}
+
+	binPath, err := FindCloudflared()
+	if err != nil {
+		return "", err
+	}
+
+	targetURL := fmt.Sprintf("http://127.0.0.1:%d", port)
+
+	if ShouldForceHTTP2() {
+		url, err := m.startAttempt(binPath, []string{"tunnel", "--protocol", "http2", "--url", targetURL, "--no-autoupdate"}, 20*time.Second)
+		if err != nil {
+			return "", fmt.Errorf("no se pudo establecer el túnel forzando HTTP/2. Intenta usar el enlace de red local (IP). Detalle: %w", err)
+		}
+		return url, nil
+	}
+
+	// Attempt 1: Standard Quick Tunnel (QUIC / UDP)
+	url, err := m.startAttempt(binPath, []string{"tunnel", "--url", targetURL, "--no-autoupdate"}, 10*time.Second)
+	if err == nil {
+		return url, nil
+	}
+
+	// Attempt 2: Corporate Firewall Fallback using HTTP/2 over TCP (port 443)
+	url, err2 := m.startAttempt(binPath, []string{"tunnel", "--protocol", "http2", "--url", targetURL, "--no-autoupdate"}, 12*time.Second)
+	if err2 == nil {
+		return url, nil
+	}
+
+	return "", fmt.Errorf("no se pudo establecer el túnel de Cloudflare (QUIC: %v; HTTP/2: %w). Intenta usar el enlace de red local (IP)", err, err2)
 }
 
 // Stop shuts down the cloudflared process
@@ -315,7 +380,11 @@ func (m *Manager) StartWithToken(token, publicDomain string) (string, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	m.cancel = cancel
 
-	cmd := exec.CommandContext(ctx, binPath, "tunnel", "run", "--token", token)
+	args := []string{"tunnel", "run", "--token", token}
+	if ShouldForceHTTP2() {
+		args = []string{"tunnel", "run", "--protocol", "http2", "--token", token}
+	}
+	cmd := exec.CommandContext(ctx, binPath, args...)
 	prepareCmdPlatform(cmd)
 	m.cmd = cmd
 
@@ -343,6 +412,13 @@ func (m *Manager) StartWithToken(token, publicDomain string) (string, error) {
 			txt := scanner.Text()
 			errMu.Lock()
 			lastErrLine = txt
+			errMu.Unlock()
+		}
+		if err := scanner.Err(); err != nil {
+			errMu.Lock()
+			if lastErrLine == "" {
+				lastErrLine = fmt.Sprintf("error al leer logs: %v", err)
+			}
 			errMu.Unlock()
 		}
 	}()

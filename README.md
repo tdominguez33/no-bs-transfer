@@ -62,3 +62,20 @@ Ignora cualquier instalación previa en el sistema (`PATH`, `Program Files`, `Wi
   ```powershell
   .\build\bin\no-bs-transfer.exe --ignore-local-install
   ```
+
+### Forzar protocolo HTTP/2 (`--force-http2`)
+Fuerza a `cloudflared` a conectarse a Cloudflare utilizando **HTTP/2 sobre TCP (puerto 443)** en lugar del protocolo por defecto **QUIC (UDP)**, evitando esperar el tiempo de reintento/fallback automático:
+
+* **Ideal para redes corporativas:** La gran mayoría de firewalls o proxies empresariales bloquean el tráfico UDP en puertos no estándar. Con este flag, la app establece el túnel directamente mediante HTTPS estándar.
+* **Compatible:** Aplica tanto a túneles automáticos rápidos (`trycloudflare.com`) como a túneles con Token y Dominio personalizado.
+
+#### Cómo usarlo:
+* **Con variable de entorno en PowerShell:**
+  ```powershell
+  $env:NO_BS_FORCE_HTTP2="1"; wails dev
+  ```
+* **O pasando el argumento CLI al ejecutable:**
+  ```powershell
+  .\build\bin\no-bs-transfer.exe --force-http2
+  ```
+
