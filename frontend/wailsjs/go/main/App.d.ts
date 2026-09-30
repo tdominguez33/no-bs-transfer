@@ -18,7 +18,13 @@ export function GetCloudflaredStatus():Promise<main.CloudflaredStatus>;
 
 export function GetConfig():Promise<config.AppConfig>;
 
+export function GetDownloadDir():Promise<string>;
+
 export function LoadFilesFromPaths(arg1:Array<string>):Promise<Array<transfer.SharedFile>>;
+
+export function OpenDownloadDir():Promise<void>;
+
+export function OpenFile(arg1:string):Promise<void>;
 
 export function RemoveFileFromShare(arg1:string):Promise<main.MultiShareResult>;
 
@@ -26,8 +32,18 @@ export function SaveConfig(arg1:config.AppConfig):Promise<void>;
 
 export function SaveWindowDimensions():Promise<void>;
 
+export function SelectDownloadDir():Promise<string>;
+
 export function SelectFiles():Promise<Array<transfer.SharedFile>>;
 
+export function SetDownloadDir(arg1:string):Promise<void>;
+
+export function ShowFileInFolder(arg1:string):Promise<void>;
+
+export function StartReceive():Promise<main.ReceiveResult>;
+
 export function StartShare(arg1:Array<transfer.SharedFile>):Promise<main.MultiShareResult>;
+
+export function StopReceive():Promise<void>;
 
 export function StopShare():Promise<void>;

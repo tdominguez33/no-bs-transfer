@@ -13,7 +13,15 @@
     SaveConfig,
     GetCloudflaredStatus,
     DownloadCloudflared,
-    CancelCloudflaredDownload
+    CancelCloudflaredDownload,
+    StartReceive,
+    StopReceive,
+    GetDownloadDir,
+    SetDownloadDir,
+    SelectDownloadDir,
+    OpenDownloadDir,
+    OpenFile,
+    ShowFileInFolder
   } from '../wailsjs/go/main/App';
   import { EventsOn, EventsOff, OnFileDrop, OnFileDropOff } from '../wailsjs/runtime/runtime';
   import type { transfer, main, config } from '../wailsjs/go/models';
@@ -42,8 +50,32 @@
     ChevronUp,
     ChevronDown,
     Download,
-    ShieldCheck
+    ShieldCheck,
+    Folder,
+    FolderOpen,
+    FolderDown,
+    ExternalLink
   } from '@lucide/svelte';
+
+  interface ReceivedFile {
+    id: string;
+    name: string;
+    size: string;
+    rawBytes: number;
+    savedPath: string;
+    completedAt: string;
+  }
+
+  interface ReceiveProgress {
+    id: string;
+    fileName: string;
+    bytesRecv: number;
+    totalBytes: number;
+    speed: number;
+    progress: number;
+    status: string;
+    error?: string;
+  }
 
   interface GuestTransfer {
     id: string;
@@ -82,11 +114,27 @@
     customDomain: '',
     tunnelToken: '',
     fixedPort: 56789,
-    savePortable: false
+    savePortable: false,
+    downloadDir: ''
   });
+  let defaultDownloadDir = $state('');
   let showToken = $state(false);
 
-  // Files State
+  // App Mode State: 'send' (default) vs 'receive'
+  let activeMode = $state<'send' | 'receive'>('send');
+
+  // Receive State
+  let isReceiving = $state(false);
+  let isStartingReceive = $state(false);
+  let isStoppingReceive = $state(false);
+  let receiveResult = $state<main.ReceiveResult | null>(null);
+  let receiveQrDataUrl = $state('');
+  let receivedFiles = $state<ReceivedFile[]>([]);
+  let activeUploads = $state<Record<string, ReceiveProgress>>({});
+  let itemWarnings = $state<Record<string, string>>({});
+  let itemWarningTimers: Record<string, any> = {};
+
+  // Files State (Send mode)
   let files = $state<transfer.SharedFile[]>([]);
   let isDragging = $state(false);
   let isSharing = $state(false);
@@ -182,6 +230,9 @@
     applyTheme(isDark);
     if (qrModal.show && qrModal.url) {
       openQR(qrModal.title, qrModal.url);
+    }
+    if (receiveResult && receiveResult.uploadUrl) {
+      generateReceiveQR(receiveResult.uploadUrl);
     }
     try {
       localStorage.setItem('nbs_theme', isDark ? 'dark' : 'light');
@@ -284,14 +335,17 @@
           customDomain: cleanDomainInput(loaded.customDomain || ''),
           tunnelToken: loaded.tunnelToken || '',
           fixedPort: loaded.fixedPort || 56789,
-          savePortable: loaded.savePortable || false
+          savePortable: loaded.savePortable || false,
+          downloadDir: loaded.downloadDir || ''
         };
+        defaultDownloadDir = loaded.downloadDir || '';
         lastSavedConfigJSON = JSON.stringify({
           useCustomDomain: configState.useCustomDomain,
           customDomain: configState.customDomain,
           tunnelToken: configState.tunnelToken,
           fixedPort: configState.fixedPort,
-          savePortable: configState.savePortable
+          savePortable: configState.savePortable,
+          downloadDir: configState.downloadDir
         });
       }
     } catch (err: any) {
@@ -311,14 +365,16 @@
     const toSave = {
       ...configState,
       fixedPort: isNaN(portVal) || portVal < 1024 ? 56789 : Math.round(portVal),
-      customDomain: cleanDomainInput(configState.customDomain)
+      customDomain: cleanDomainInput(configState.customDomain),
+      downloadDir: configState.downloadDir || ''
     };
     const currentJSON = JSON.stringify({
       useCustomDomain: toSave.useCustomDomain,
       customDomain: toSave.customDomain,
       tunnelToken: toSave.tunnelToken,
       fixedPort: toSave.fixedPort,
-      savePortable: toSave.savePortable
+      savePortable: toSave.savePortable,
+      downloadDir: toSave.downloadDir
     });
     if (currentJSON === lastSavedConfigJSON) {
       return;
@@ -403,6 +459,27 @@
       shareResult = null;
     });
 
+    EventsOn('receive_file_progress', (p: ReceiveProgress) => {
+      activeUploads[p.id] = p;
+      if (p.status === 'completed' || p.status === 'error') {
+        setTimeout(() => {
+          const copy = { ...activeUploads };
+          delete copy[p.id];
+          activeUploads = copy;
+        }, 1200);
+      }
+    });
+
+    EventsOn('receive_file_completed', (f: ReceivedFile) => {
+      receivedFiles = [f, ...receivedFiles.filter(item => item.id !== f.id)];
+    });
+
+    EventsOn('receive_stopped', () => {
+      isReceiving = false;
+      receiveResult = null;
+      receiveQrDataUrl = '';
+    });
+
     refreshCloudflaredStatus();
 
     EventsOn('cloudflared_download_progress', (p: { downloaded: number; total: number; percent: number; speed: number; done: boolean; error?: string }) => {
@@ -445,10 +522,15 @@
     OnFileDropOff();
     EventsOff('transfer_update');
     EventsOff('share_stopped');
+    EventsOff('receive_file_progress');
+    EventsOff('receive_file_completed');
+    EventsOff('receive_stopped');
     EventsOff('cloudflared_download_progress');
     window.removeEventListener('dragover', handleGlobalDragOver);
     window.removeEventListener('dragenter', handleGlobalDragOver);
     window.removeEventListener('drop', handleGlobalDrop);
+    Object.values(itemWarningTimers).forEach(t => clearTimeout(t));
+    itemWarningTimers = {};
   });
 
   function addFiles(newFiles: transfer.SharedFile[]) {
@@ -659,6 +741,135 @@
     }
   }
 
+  async function generateReceiveQR(url: string) {
+    if (!url) return;
+    try {
+      receiveQrDataUrl = await QRCode.toDataURL(url, {
+        width: 450,
+        margin: 1.5,
+        color: {
+          dark: isDark ? '#ffffff' : '#09090b',
+          light: isDark ? '#09090b' : '#ffffff'
+        }
+      });
+    } catch (e) {
+      console.error('Error generating receive QR:', e);
+    }
+  }
+
+  async function handleStartReceive() {
+    errorMessage = '';
+    if (configState.useCustomDomain) {
+      if (!configState.customDomain.trim() || !configState.tunnelToken.trim()) {
+        errorMessage = 'Has activado dominio propio pero falta completar el dominio o el token en Configuración.';
+        showConfig = true;
+        return;
+      }
+    }
+
+    isStartingReceive = true;
+    try {
+      const res = await StartReceive();
+      if (res) {
+        receiveResult = res;
+        isReceiving = true;
+        await generateReceiveQR(res.uploadUrl);
+      }
+    } catch (err: any) {
+      errorMessage = err?.message || 'Error al iniciar el receptor de archivos';
+      isReceiving = false;
+    } finally {
+      isStartingReceive = false;
+    }
+  }
+
+  async function handleStopReceive() {
+    isStoppingReceive = true;
+    errorMessage = '';
+    try {
+      await StopReceive();
+      isReceiving = false;
+      receiveResult = null;
+      receiveQrDataUrl = '';
+    } catch (err: any) {
+      errorMessage = err?.message || 'Error al detener la recepción';
+    } finally {
+      isStoppingReceive = false;
+    }
+  }
+
+  async function switchMode(mode: 'send' | 'receive') {
+    if (activeMode === mode || isStarting || isStartingReceive || isStopping || isStoppingReceive) return;
+
+    if (mode === 'receive') {
+      if (isSharing) {
+        await handleStopShare();
+      }
+      activeMode = 'receive';
+      if (!isReceiving && !isStartingReceive) {
+        await handleStartReceive();
+      }
+    } else {
+      if (isReceiving) {
+        await handleStopReceive();
+      }
+      activeMode = 'send';
+    }
+  }
+
+  async function handleSelectDownloadDir() {
+    errorMessage = '';
+    try {
+      const selected = await SelectDownloadDir();
+      if (selected) {
+        configState.downloadDir = selected;
+        if (receiveResult) {
+          receiveResult.downloadDir = selected;
+        }
+        await performSave();
+      }
+    } catch (err: any) {
+      errorMessage = err?.message || 'Error al seleccionar carpeta de descargas';
+    }
+  }
+
+  async function handleOpenDownloadDir() {
+    try {
+      await OpenDownloadDir();
+    } catch (err: any) {
+      errorMessage = err?.message || 'Error al abrir la carpeta de descargas';
+    }
+  }
+
+  function setItemWarning(fileId: string, msg: string) {
+    itemWarnings[fileId] = msg;
+    if (itemWarningTimers[fileId]) {
+      clearTimeout(itemWarningTimers[fileId]);
+    }
+    itemWarningTimers[fileId] = setTimeout(() => {
+      const copy = { ...itemWarnings };
+      delete copy[fileId];
+      itemWarnings = copy;
+      delete itemWarningTimers[fileId];
+    }, 3500);
+  }
+
+  async function handleOpenFile(rf: ReceivedFile) {
+    try {
+      await OpenFile(rf.savedPath);
+    } catch (err: any) {
+      setItemWarning(rf.id, 'El archivo fue movido o eliminado');
+    }
+  }
+
+  async function handleShowFileInFolder(rf: ReceivedFile) {
+    try {
+      await ShowFileInFolder(rf.savedPath);
+    } catch (err: any) {
+      setItemWarning(rf.id, 'El archivo fue movido o eliminado');
+    }
+  }
+
   function promptRemoveFile(fileId: string, fileName: string) {
     deleteModal = {
       show: true,
@@ -763,8 +974,8 @@
         <h1 class="font-semibold text-sm tracking-tight text-zinc-900 dark:text-zinc-100">
           no-bs-transfer
         </h1>
-        <span class="text-xs px-2 py-0.5 rounded-md font-mono {isSharing ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20' : 'bg-zinc-100 dark:bg-zinc-900 text-zinc-500 dark:text-zinc-400 border border-zinc-200 dark:border-zinc-800'}">
-          {isSharing ? 'túnel activo' : 'túnel inactivo'}
+        <span class="text-xs px-2 py-0.5 rounded-md font-mono {isReceiving || isSharing ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20' : 'bg-zinc-100 dark:bg-zinc-900 text-zinc-500 dark:text-zinc-400 border border-zinc-200 dark:border-zinc-800'}">
+          {isReceiving || isSharing ? 'túnel activo' : 'túnel inactivo'}
         </span>
       </div>
 
@@ -795,6 +1006,32 @@
         </button>
       </div>
     </header>
+
+    <!-- Mode Selector: Inmediatamente debajo de la barra superior -->
+    {#if !showConfig}
+      <div class="shrink-0 flex items-center justify-center pt-2.5 pb-1">
+        <div class="inline-flex p-1 bg-zinc-200/80 dark:bg-zinc-800/80 rounded-xl border border-zinc-200/80 dark:border-zinc-700/60 shadow-xs">
+          <button
+            type="button"
+            onclick={() => switchMode('send')}
+            disabled={isStarting || isStartingReceive || isStopping || isStoppingReceive}
+            class="px-4 py-1.5 rounded-lg text-xs font-semibold transition-all duration-150 flex items-center gap-1.5 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed {activeMode === 'send' ? 'bg-white dark:bg-zinc-900 text-zinc-900 dark:text-zinc-100 shadow-sm' : 'text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200'}"
+          >
+            <Upload class="w-3.5 h-3.5" />
+            <span>Enviar</span>
+          </button>
+          <button
+            type="button"
+            onclick={() => switchMode('receive')}
+            disabled={isStarting || isStartingReceive || isStopping || isStoppingReceive}
+            class="px-4 py-1.5 rounded-lg text-xs font-semibold transition-all duration-150 flex items-center gap-1.5 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed {activeMode === 'receive' ? 'bg-white dark:bg-zinc-900 text-zinc-900 dark:text-zinc-100 shadow-sm' : 'text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200'}"
+          >
+            <Download class="w-3.5 h-3.5" />
+            <span>Recibir</span>
+          </button>
+        </div>
+      </div>
+    {/if}
 
     <!-- Error Alert -->
     {#if errorMessage}
@@ -839,14 +1076,14 @@
 
           <!-- Config Scrollable Body -->
           <div class="flex-1 overflow-y-auto pr-1 flex flex-col gap-5 min-h-0">
-            {#if isSharing}
+            {#if isSharing || isReceiving}
               <div class="p-3 rounded-lg bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-900/50 flex items-center gap-2 text-xs text-amber-700 dark:text-amber-400 shrink-0">
                 <AlertCircle class="w-4 h-4 shrink-0" />
                 <span>Hay un túnel activo. Cualquier cambio guardado se aplicará en la próxima sesión.</span>
               </div>
             {/if}
 
-            <!-- Section 1: Cloudflare Tunnel Component (cloudflared) -->
+            <!-- Section 1: Componente de Túnel (Cloudflared) -->
             <div class="border border-zinc-200 dark:border-zinc-800 rounded-xl bg-white dark:bg-zinc-900/40 p-5 flex flex-col gap-3 shrink-0 transition-colors">
               <div class="flex items-start justify-between gap-4">
                 <div class="flex flex-col gap-1 flex-1">
@@ -911,7 +1148,54 @@
               {/if}
             </div>
 
-            <!-- Section 2: Custom Domain -->
+            <!-- Section 2: Carpeta de Descargas -->
+            <div class="border border-zinc-200 dark:border-zinc-800 rounded-xl bg-white dark:bg-zinc-900/40 p-5 flex flex-col gap-3 shrink-0 transition-colors">
+              <div class="flex items-start justify-between gap-4">
+                <div class="flex flex-col gap-1 flex-1">
+                  <div class="flex items-center gap-2">
+                    <FolderDown class="w-4 h-4 text-zinc-600 dark:text-zinc-400" />
+                    <h3 class="text-xs font-semibold tracking-wider text-zinc-900 dark:text-zinc-100">
+                      Carpeta de Descargas
+                    </h3>
+                  </div>
+                  <p class="text-xs text-zinc-500 dark:text-zinc-400 leading-relaxed">
+                    Ubicación en tu equipo donde se guardarán los archivos recibidos en el modo recibir.
+                  </p>
+                </div>
+              </div>
+
+              <div class="mt-1 flex items-center justify-between gap-2.5 p-2.5 rounded-lg bg-zinc-50 dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800">
+                <div class="flex items-center gap-2 min-w-0 flex-1">
+                  <Folder class="w-4 h-4 text-zinc-400 shrink-0" />
+                  <span class="text-[11px] leading-none font-mono text-zinc-700 dark:text-zinc-300 truncate" title={configState.downloadDir}>
+                    {configState.downloadDir || 'Descargas (por defecto)'}
+                  </span>
+                </div>
+
+                <div class="flex items-center gap-1.5 shrink-0">
+                  <button
+                    type="button"
+                    onclick={handleSelectDownloadDir}
+                    class="px-2.5 py-1.5 bg-zinc-900 hover:bg-zinc-800 dark:bg-zinc-100 dark:hover:bg-zinc-200 text-white dark:text-zinc-900 rounded-lg text-xs font-medium transition-colors flex items-center gap-1 cursor-pointer"
+                    title="Elegir otra carpeta de descargas"
+                  >
+                    <FolderOpen class="w-3.5 h-3.5" />
+                    <span>Cambiar</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onclick={handleOpenDownloadDir}
+                    class="p-1.5 border border-zinc-200 dark:border-zinc-700 hover:bg-zinc-100 dark:hover:bg-zinc-800 text-zinc-600 dark:text-zinc-300 rounded-lg text-xs transition-colors cursor-pointer"
+                    title="Abrir carpeta en el explorador"
+                  >
+                    <ExternalLink class="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <!-- Section 3: Custom Domain -->
             <div class="border border-zinc-200 dark:border-zinc-800 rounded-xl bg-white dark:bg-zinc-900/40 p-5 flex flex-col gap-0 shrink-0 transition-colors">
               <div class="flex items-start justify-between gap-4">
                 <!-- svelte-ignore a11y_click_events_have_key_events -->
@@ -1101,7 +1385,7 @@
 
           </div>
         </div>
-      {:else if !isSharing}
+      {:else if activeMode === 'send' && !isSharing}
         <!-- Initial / Staging View: Layout accounts for action bar in both empty and populated states to eliminate layout shifts -->
         <div
           class="w-full my-auto flex flex-col max-h-full min-h-0 shrink"
@@ -1231,20 +1515,20 @@
               disabled={isStarting || files.length === 0}
               tabindex={files.length === 0 ? -1 : 0}
               aria-hidden={files.length === 0}
-              class="w-36 justify-center rounded-lg bg-zinc-900 hover:bg-zinc-800 dark:bg-zinc-100 dark:hover:bg-zinc-200 text-white dark:text-zinc-900 text-xs font-medium transition-colors cursor-pointer flex items-center gap-2 disabled:opacity-50 shadow-xs {files.length === 0 ? 'invisible pointer-events-none' : ''}"
+              class="w-36 justify-center rounded-lg bg-zinc-900 hover:bg-zinc-800 dark:bg-zinc-100 dark:hover:bg-zinc-200 text-white dark:text-zinc-900 text-xs font-medium transition-colors cursor-pointer flex items-center gap-2 disabled:opacity-80 shadow-xs {files.length === 0 ? 'invisible pointer-events-none' : ''}"
               style="padding-top: clamp(0.4rem, 1.2vh, 0.625rem); padding-bottom: clamp(0.4rem, 1.2vh, 0.625rem);"
             >
               {#if isStarting}
-                <span class="animate-spin h-3.5 w-3.5 border-2 border-current border-t-transparent rounded-full"></span>
-                Conectando...
+                <span class="animate-spin h-3.5 w-3.5 border-2 border-white/30 border-t-white dark:border-zinc-900/30 dark:border-t-zinc-900 rounded-full shrink-0"></span>
+                <span>Conectando...</span>
               {:else}
                 <CornerDownLeft class="w-4 h-4" />
-                Compartir
+                <span>Compartir</span>
               {/if}
             </button>
           </div>
         </div>
-      {:else}
+      {:else if activeMode === 'send' && isSharing}
         <!-- Active Sharing Dashboard -->
         <div class="flex-1 flex flex-col gap-6 min-h-0 overflow-y-auto scrollbar-gutter-both">
           <div class="border border-zinc-200 dark:border-zinc-800 rounded-xl bg-white dark:bg-zinc-900/40 p-4 flex flex-col gap-4 shrink-0 shadow-xs">
@@ -1267,7 +1551,7 @@
                   title="Agregar más archivos sin reiniciar el túnel"
                 >
                   {#if isAddingMore}
-                    <span class="animate-spin h-3 w-3 border-2 border-current border-t-transparent rounded-full shrink-0"></span>
+                    <span class="animate-spin h-3 w-3 border-2 border-zinc-300 border-t-zinc-800 dark:border-zinc-600 dark:border-t-zinc-200 rounded-full shrink-0"></span>
                     <span class="hidden md:inline">Añadiendo...</span>
                     <span class="md:hidden">Añadiendo...</span>
                   {:else}
@@ -1283,7 +1567,7 @@
                   class="px-3 py-1 rounded-md text-xs font-medium text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/30 border border-red-200 dark:border-red-900/40 transition-colors cursor-pointer flex items-center gap-1 disabled:opacity-50 shrink-0"
                 >
                   {#if isStopping}
-                    <span class="animate-spin h-3 w-3 border-2 border-current border-t-transparent rounded-full"></span>
+                    <span class="animate-spin h-3 w-3 border-2 border-red-200 border-t-red-600 dark:border-red-900/60 dark:border-t-red-400 rounded-full shrink-0"></span>
                     Deteniendo...
                   {:else}
                     Detener
@@ -1519,6 +1803,272 @@
             {/if}
           </div>
         </div>
+      {:else}
+        <!-- Receive Mode View -->
+        <div
+          class="w-full my-auto flex flex-col max-h-full min-h-0 shrink"
+          style="gap: clamp(0.5rem, 1.8vh, 1rem);"
+        >
+          {#if isStartingReceive}
+            <!-- Loading State: Initiating Tunnel -->
+            <div
+              class="w-full border-2 border-dashed border-zinc-300 dark:border-zinc-800 rounded-xl bg-white dark:bg-zinc-900/30 text-center flex flex-col items-center justify-center min-h-0 max-h-full shrink"
+              style="height: clamp(140px, 36vh, 260px); padding-top: clamp(0.5rem, 3vh, 2rem); padding-bottom: clamp(0.5rem, 3vh, 2rem); padding-left: 1.5rem; padding-right: 1.5rem;"
+            >
+              <div class="flex flex-col items-center justify-center max-w-sm shrink min-h-0">
+                <div
+                  class="rounded-full bg-zinc-100 dark:bg-zinc-800/80 text-zinc-600 dark:text-zinc-400 shrink-0 flex items-center justify-center"
+                  style="padding: clamp(0.45rem, 1.8vh, 1rem); margin-bottom: clamp(0.35rem, 1.4vh, 0.75rem);"
+                >
+                  <span class="animate-spin h-7 w-7 sm:h-8 sm:w-8 border-2 border-zinc-300 border-t-zinc-900 dark:border-zinc-700 dark:border-t-zinc-100 rounded-full shrink-0"></span>
+                </div>
+                <p class="text-sm font-medium text-zinc-800 dark:text-zinc-200 text-center leading-snug" style="margin-bottom: clamp(0.2rem, 0.8vh, 0.35rem);">
+                  Iniciando receptor de archivos...
+                </p>
+                <p class="text-xs text-zinc-500 dark:text-zinc-400 text-center leading-normal">
+                  Generando enlace público y código QR con Cloudflare
+                </p>
+              </div>
+            </div>
+
+            <!-- Action Bar: Reserved to match Send mode and eliminate any vertical shift -->
+            <div class="shrink-0 flex justify-end">
+              <button
+                tabindex="-1"
+                aria-hidden="true"
+                class="w-36 justify-center rounded-lg bg-zinc-900 text-white text-xs font-medium flex items-center gap-2 invisible pointer-events-none"
+                style="padding-top: clamp(0.4rem, 1.2vh, 0.625rem); padding-bottom: clamp(0.4rem, 1.2vh, 0.625rem);"
+              >
+                <CornerDownLeft class="w-4 h-4" />
+                <span>Compartir</span>
+              </button>
+            </div>
+          {:else if isReceiving && receiveResult}
+            <!-- Active Receive Dashboard -->
+            <div class="flex-1 flex flex-col gap-3 min-h-0 overflow-y-auto pr-0.5">
+              <!-- Main QR & Link Card -->
+              <div class="border border-zinc-200 dark:border-zinc-800 rounded-xl bg-white dark:bg-zinc-900/40 p-4 flex flex-col gap-3.5 shrink-0 shadow-xs">
+                <!-- Top Status Header & Stop Button -->
+                <div class="flex items-center justify-between pb-2.5 border-b border-zinc-100 dark:border-zinc-800/60">
+                  <div class="flex items-center gap-2">
+                    <span class="h-2 w-2 rounded-full bg-emerald-500 animate-pulse"></span>
+                    <span class="text-xs font-semibold text-zinc-800 dark:text-zinc-200">
+                      Listo para recibir archivos
+                    </span>
+                  </div>
+
+                  <button
+                    onclick={handleStopReceive}
+                    disabled={isStoppingReceive}
+                    class="px-3 py-1 rounded-md text-xs font-medium text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/30 border border-red-200 dark:border-red-900/40 transition-colors cursor-pointer flex items-center gap-1 disabled:opacity-50 shrink-0"
+                  >
+                    {#if isStoppingReceive}
+                      <span class="animate-spin h-3 w-3 border-2 border-red-200 border-t-red-600 dark:border-red-900/60 dark:border-t-red-400 rounded-full shrink-0"></span>
+                      <span>Deteniendo...</span>
+                    {:else}
+                      <span>Detener</span>
+                    {/if}
+                  </button>
+                </div>
+
+                <!-- QR + URL Content -->
+                <div class="flex flex-col sm:flex-row items-center gap-4">
+                  <!-- QR Code Plate -->
+                  <div class="shrink-0 flex flex-col items-center">
+                    <button
+                      type="button"
+                      onclick={() => openQR('Cargar archivos', receiveResult?.uploadUrl || '')}
+                      class="bg-white p-2 rounded-xl border border-zinc-200 dark:border-zinc-800 shadow-xs cursor-pointer hover:border-zinc-400 dark:hover:border-zinc-600 transition-colors"
+                      title="Ampliar código QR"
+                    >
+                      {#if receiveQrDataUrl}
+                        <img
+                          src={receiveQrDataUrl}
+                          alt="Código QR para subir archivos"
+                          class="w-28 h-28 sm:w-32 sm:h-32 object-contain aspect-square select-none pointer-events-none"
+                        />
+                      {/if}
+                    </button>
+                    <span class="text-[10px] text-zinc-400 mt-1">Clic para ampliar</span>
+                  </div>
+
+                  <!-- Details & Link -->
+                  <div class="flex-1 flex flex-col gap-2.5 min-w-0 w-full">
+                    <div class="flex flex-col gap-0.5">
+                      <span class="text-xs font-medium text-zinc-800 dark:text-zinc-200">
+                        Enlace para subir archivos:
+                      </span>
+                      <p class="text-[11px] text-zinc-500 dark:text-zinc-400">
+                        Escanea el QR o abre este link en tu teléfono o navegador:
+                      </p>
+                    </div>
+
+                    <div class="flex items-center gap-2">
+                      <input
+                        type="text"
+                        readonly
+                        value={formatDisplayUrl(receiveResult.uploadUrl)}
+                        class="flex-1 bg-zinc-50 dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 rounded-lg px-3 py-1.5 text-xs font-mono text-zinc-800 dark:text-zinc-200 outline-none select-all min-w-0"
+                      />
+                      <button
+                        onclick={() => copyText('receive_url', receiveResult?.uploadUrl || '')}
+                        class="w-[5.5rem] justify-center py-1.5 bg-zinc-900 hover:bg-zinc-800 dark:bg-zinc-100 dark:hover:bg-zinc-200 text-white dark:text-zinc-900 text-xs font-medium rounded-lg transition-colors cursor-pointer flex items-center gap-1.5 shrink-0"
+                      >
+                        {#if copiedMap['receive_url']}
+                          <Check class="w-3.5 h-3.5" />
+                          <span>Copiado</span>
+                        {:else}
+                          <Copy class="w-3.5 h-3.5" />
+                          <span>Copiar</span>
+                        {/if}
+                      </button>
+                    </div>
+
+                    <!-- Destination Directory Info -->
+                    <div class="flex items-center justify-between gap-2 p-2 rounded-lg bg-zinc-50 dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 text-[11px]">
+                      <div class="flex items-center gap-1.5 min-w-0 flex-1 text-zinc-600 dark:text-zinc-400">
+                        <Folder class="w-3.5 h-3.5 shrink-0 text-zinc-400" />
+                        <span class="truncate leading-none" title={receiveResult.downloadDir}>
+                          Guardando en: <strong class="text-zinc-800 dark:text-zinc-200 font-mono font-medium">{receiveResult.downloadDir}</strong>
+                        </span>
+                      </div>
+                      <div class="flex items-center shrink-0">
+                        <button
+                          type="button"
+                          onclick={handleSelectDownloadDir}
+                          class="px-2 py-0.5 rounded text-[11px] font-medium text-zinc-700 dark:text-zinc-300 hover:bg-zinc-200 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
+                          title="Cambiar carpeta de descarga"
+                        >
+                          Cambiar
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Active Uploads (in progress) -->
+              {#if Object.keys(activeUploads).length > 0}
+                <div class="border border-zinc-200 dark:border-zinc-800 rounded-xl bg-white dark:bg-zinc-900/40 p-3.5 flex flex-col gap-2 shrink-0 shadow-xs">
+                  <div class="text-xs font-semibold text-zinc-800 dark:text-zinc-200">
+                    Recibiendo en este momento:
+                  </div>
+                  <div class="divide-y divide-zinc-100 dark:divide-zinc-800/60">
+                    {#each Object.values(activeUploads) as upload (upload.id)}
+                      <div class="py-1.5 flex flex-col gap-1">
+                        <div class="flex items-center justify-between text-xs">
+                          <span class="font-medium text-zinc-800 dark:text-zinc-200 truncate">{upload.fileName}</span>
+                          <span class="text-xs font-mono text-emerald-600 dark:text-emerald-400">
+                            {upload.progress.toFixed(0)}% · {formatSpeed(upload.speed)}
+                          </span>
+                        </div>
+                        <div class="w-full h-1.5 bg-zinc-100 dark:bg-zinc-800 rounded-full overflow-hidden">
+                          <div
+                            class="h-full bg-emerald-500 rounded-full transition-all duration-150"
+                            style="width: {upload.progress}%"
+                          ></div>
+                        </div>
+                      </div>
+                    {/each}
+                  </div>
+                </div>
+              {/if}
+
+              <!-- Received Files List -->
+              <div class="border border-zinc-200 dark:border-zinc-800 rounded-xl bg-white dark:bg-zinc-900/40 overflow-hidden flex flex-col shrink-0 shadow-xs">
+                <div class="px-4 py-2.5 border-b border-zinc-200 dark:border-zinc-800 flex items-center justify-between text-xs">
+                  <span class="font-medium text-zinc-500 dark:text-zinc-400">
+                    Archivos recibidos en esta sesión ({receivedFiles.length})
+                  </span>
+                </div>
+
+                {#if receivedFiles.length === 0}
+                  <div class="py-8 text-center text-xs text-zinc-400 dark:text-zinc-500">
+                    Aún no se han recibido archivos. Los archivos cargados desde el enlace se guardarán automáticamente en tu carpeta de descargas.
+                  </div>
+                {:else}
+                  <div class="divide-y divide-zinc-100 dark:divide-zinc-800/60 max-h-[220px] overflow-y-auto">
+                    {#each receivedFiles as rf (rf.id)}
+                      <div class="px-3.5 py-2.5 flex flex-col gap-1.5 hover:bg-zinc-50/50 dark:hover:bg-zinc-800/30 transition-colors">
+                        <div class="flex items-center justify-between gap-3 text-xs">
+                          <div class="flex items-center gap-2.5 min-w-0 flex-1">
+                            <div class="w-7 h-7 rounded-lg bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-900/40 flex items-center justify-center text-emerald-600 dark:text-emerald-400 shrink-0">
+                              <Check class="w-3.5 h-3.5" />
+                            </div>
+                            <div class="flex flex-col min-w-0">
+                              <span class="font-medium text-zinc-900 dark:text-zinc-100 truncate" title={rf.name}>{rf.name}</span>
+                              <span class="text-[11px] font-mono text-zinc-400">{rf.size} · {rf.completedAt}</span>
+                            </div>
+                          </div>
+
+                          <div class="flex items-center gap-1.5 shrink-0">
+                            <button
+                              type="button"
+                              onclick={() => handleOpenFile(rf)}
+                              class="px-2.5 py-1 bg-zinc-100 dark:bg-zinc-800 hover:bg-zinc-200 dark:hover:bg-zinc-700 text-zinc-800 dark:text-zinc-200 rounded text-xs font-medium transition-colors cursor-pointer"
+                              title="Abrir archivo"
+                            >
+                              Abrir
+                            </button>
+                            <button
+                              type="button"
+                              onclick={() => handleShowFileInFolder(rf)}
+                              class="p-1 text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200 rounded transition-colors cursor-pointer"
+                              title="Mostrar en carpeta"
+                            >
+                              <FolderOpen class="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        </div>
+
+                        {#if itemWarnings[rf.id]}
+                          <div class="flex items-center gap-1.5 text-[11px] text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-900/40 rounded px-2 py-1">
+                            <AlertCircle class="w-3.5 h-3.5 shrink-0" />
+                            <span>{itemWarnings[rf.id]}</span>
+                          </div>
+                        {/if}
+                      </div>
+                    {/each}
+                  </div>
+                {/if}
+              </div>
+            </div>
+          {:else}
+            <!-- Stopped / Inactive State -->
+            <div
+              class="w-full border-2 border-dashed border-zinc-300 dark:border-zinc-800 rounded-xl bg-white dark:bg-zinc-900/30 text-center flex flex-col items-center justify-center min-h-0 max-h-full shrink"
+              style="height: clamp(140px, 36vh, 260px); padding-top: clamp(0.5rem, 3vh, 2rem); padding-bottom: clamp(0.5rem, 3vh, 2rem); padding-left: 1.5rem; padding-right: 1.5rem;"
+            >
+              <div class="flex flex-col items-center justify-center max-w-sm shrink min-h-0">
+                <div
+                  class="rounded-full bg-zinc-100 dark:bg-zinc-800/80 text-zinc-500 dark:text-zinc-400 shrink-0"
+                  style="padding: clamp(0.45rem, 1.8vh, 1rem); margin-bottom: clamp(0.35rem, 1.4vh, 0.75rem);"
+                >
+                  <Download class="w-7 h-7 sm:w-8 sm:h-8" />
+                </div>
+                <p class="text-sm font-medium text-zinc-800 dark:text-zinc-200 text-center leading-snug" style="margin-bottom: clamp(0.2rem, 0.8vh, 0.35rem);">
+                  Recepción inactiva
+                </p>
+                <p class="text-xs text-zinc-500 dark:text-zinc-400 text-center leading-normal">
+                  Inicia el receptor para generar un enlace y código QR donde otros dispositivos puedan enviarte archivos.
+                </p>
+              </div>
+            </div>
+
+            <!-- Action Bar: Iniciar recepción button matching Send mode action bar -->
+            <div class="shrink-0 flex justify-end">
+              <button
+                type="button"
+                onclick={handleStartReceive}
+                class="w-36 justify-center rounded-lg bg-zinc-900 hover:bg-zinc-800 dark:bg-zinc-100 dark:hover:bg-zinc-200 text-white dark:text-zinc-900 text-xs font-medium transition-colors cursor-pointer flex items-center gap-2 shadow-xs"
+                style="padding-top: clamp(0.4rem, 1.2vh, 0.625rem); padding-bottom: clamp(0.4rem, 1.2vh, 0.625rem);"
+              >
+                <CornerDownLeft class="w-4 h-4" />
+                <span>Iniciar</span>
+              </button>
+            </div>
+          {/if}
+        </div>
       {/if}
     </main>
 
@@ -1621,7 +2171,7 @@
               class="px-3.5 py-1.5 bg-red-600 hover:bg-red-700 dark:bg-red-800 dark:hover:bg-red-700 text-white font-medium rounded-lg text-xs transition-colors cursor-pointer flex items-center gap-1.5 disabled:opacity-50"
             >
               {#if isDeleting}
-                <span class="animate-spin h-3.5 w-3.5 border-2 border-white border-t-transparent rounded-full"></span>
+                <span class="animate-spin h-3.5 w-3.5 border-2 border-white/30 border-t-white rounded-full shrink-0"></span>
                 <span>Eliminando...</span>
               {:else}
                 <Trash2 class="w-3.5 h-3.5" />

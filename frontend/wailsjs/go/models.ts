@@ -6,6 +6,7 @@ export namespace config {
 	    tunnelToken: string;
 	    fixedPort: number;
 	    savePortable: boolean;
+	    downloadDir: string;
 	    windowWidth?: number;
 	    windowHeight?: number;
 	
@@ -20,6 +21,7 @@ export namespace config {
 	        this.tunnelToken = source["tunnelToken"];
 	        this.fixedPort = source["fixedPort"];
 	        this.savePortable = source["savePortable"];
+	        this.downloadDir = source["downloadDir"];
 	        this.windowWidth = source["windowWidth"];
 	        this.windowHeight = source["windowHeight"];
 	    }
@@ -98,6 +100,24 @@ export namespace main {
 		    }
 		    return a;
 		}
+	}
+	export class ReceiveResult {
+	    publicUrl: string;
+	    uploadUrl: string;
+	    localUrls: string[];
+	    downloadDir: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new ReceiveResult(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.publicUrl = source["publicUrl"];
+	        this.uploadUrl = source["uploadUrl"];
+	        this.localUrls = source["localUrls"];
+	        this.downloadDir = source["downloadDir"];
+	    }
 	}
 
 }

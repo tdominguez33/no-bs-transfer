@@ -167,3 +167,25 @@ func TestPortableLoadAndSave(t *testing.T) {
 		t.Errorf("expected SavePortable to remain true")
 	}
 }
+
+func TestDownloadDir(t *testing.T) {
+	def := DefaultDownloadDir()
+	if def == "" {
+		t.Fatal("expected non-empty DefaultDownloadDir")
+	}
+
+	cfg := &AppConfig{
+		DownloadDir: "",
+	}
+	eff := GetEffectiveDownloadDir(cfg)
+	if eff != def {
+		t.Errorf("GetEffectiveDownloadDir() with empty = %q; want %q", eff, def)
+	}
+
+	tmpDir := t.TempDir()
+	cfg.DownloadDir = tmpDir
+	eff = GetEffectiveDownloadDir(cfg)
+	if eff != tmpDir {
+		t.Errorf("GetEffectiveDownloadDir() with tmpDir = %q; want %q", eff, tmpDir)
+	}
+}

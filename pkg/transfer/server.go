@@ -447,20 +447,46 @@ var landingTemplate = template.Must(template.New("landing").Parse(`<!DOCTYPE htm
       }
     }
     * { box-sizing: border-box; margin: 0; padding: 0; }
+    html {
+      height: 100%;
+    }
     body {
       background: var(--bg);
       color: var(--text);
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      min-height: 100%;
       min-height: 100vh;
+      min-height: 100dvh;
       display: flex;
       flex-direction: column;
       align-items: center;
-      justify-content: center;
-      padding: 1.5rem;
+      padding: 1.25rem 1rem;
+      box-sizing: border-box;
+      overflow-y: auto;
+      overflow-x: hidden;
+      overscroll-behavior-y: contain;
     }
     .container {
       max-width: 560px;
       width: 100%;
+      margin: auto 0;
+    }
+    @media (max-width: 640px) {
+      body {
+        padding: 0.75rem 0.85rem;
+      }
+      .header {
+        margin-bottom: 1rem;
+      }
+      .title {
+        font-size: 1.15rem;
+      }
+      .subtitle {
+        font-size: 0.8rem;
+      }
+      .file-item {
+        padding: 0.75rem 1rem;
+      }
     }
     .header {
       margin-bottom: 1.5rem;
@@ -532,7 +558,7 @@ var landingTemplate = template.Must(template.New("landing").Parse(`<!DOCTYPE htm
   <div class="container">
     <div class="header">
       <h1 class="title">Archivos disponibles</h1>
-      <p class="subtitle">Haz clic en descargar para transferir directamente desde el anfitrión.</p>
+      <p class="subtitle">Toca o haz clic en descargar para transferir directamente desde el anfitrión.</p>
     </div>
 
     <div class="card">

@@ -30,8 +30,20 @@ export function GetConfig() {
   return window['go']['main']['App']['GetConfig']();
 }
 
+export function GetDownloadDir() {
+  return window['go']['main']['App']['GetDownloadDir']();
+}
+
 export function LoadFilesFromPaths(arg1) {
   return window['go']['main']['App']['LoadFilesFromPaths'](arg1);
+}
+
+export function OpenDownloadDir() {
+  return window['go']['main']['App']['OpenDownloadDir']();
+}
+
+export function OpenFile(arg1) {
+  return window['go']['main']['App']['OpenFile'](arg1);
 }
 
 export function RemoveFileFromShare(arg1) {
@@ -46,12 +58,32 @@ export function SaveWindowDimensions() {
   return window['go']['main']['App']['SaveWindowDimensions']();
 }
 
+export function SelectDownloadDir() {
+  return window['go']['main']['App']['SelectDownloadDir']();
+}
+
 export function SelectFiles() {
   return window['go']['main']['App']['SelectFiles']();
 }
 
+export function SetDownloadDir(arg1) {
+  return window['go']['main']['App']['SetDownloadDir'](arg1);
+}
+
+export function ShowFileInFolder(arg1) {
+  return window['go']['main']['App']['ShowFileInFolder'](arg1);
+}
+
+export function StartReceive() {
+  return window['go']['main']['App']['StartReceive']();
+}
+
 export function StartShare(arg1) {
   return window['go']['main']['App']['StartShare'](arg1);
+}
+
+export function StopReceive() {
+  return window['go']['main']['App']['StopReceive']();
 }
 
 export function StopShare() {

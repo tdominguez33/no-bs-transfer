@@ -7,6 +7,10 @@ import (
 	"fmt"
 	"math/big"
 	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"strings"
 	"sync"
 	"time"
 
@@ -34,6 +38,14 @@ type MultiShareResult struct {
 	TotalSize     string          `json:"totalSize"`
 }
 
+// ReceiveResult contains the public upload URL, local addresses, and destination directory
+type ReceiveResult struct {
+	PublicURL   string   `json:"publicUrl"`
+	UploadURL   string   `json:"uploadUrl"`
+	LocalURLs   []string `json:"localUrls"`
+	DownloadDir string   `json:"downloadDir"`
+}
+
 // CloudflaredStatus represents the installation status of cloudflared
 type CloudflaredStatus struct {
 	Installed bool   `json:"installed"`
@@ -45,6 +57,8 @@ type App struct {
 	ctx            context.Context
 	tunnelManager  *tunnel.Manager
 	server         *transfer.Server
+	receiveServer  *transfer.ReceiveServer
+	isReceiving    bool
 	mu             sync.Mutex
 	activeFiles    []*transfer.SharedFile
 	bundleCode     string
@@ -71,6 +85,7 @@ func (a *App) beforeClose(ctx context.Context) bool {
 
 func (a *App) shutdown(ctx context.Context) {
 	a.StopShare()
+	a.StopReceive()
 }
 
 // SaveWindowDimensions saves current window width and height to config
@@ -267,11 +282,16 @@ func (a *App) StartShare(files []*transfer.SharedFile) (*MultiShareResult, error
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
-	// Stop any existing share
+	// Stop any existing share or receive
 	if a.server != nil {
 		a.server.Stop()
 		a.server = nil
 	}
+	if a.receiveServer != nil {
+		a.receiveServer.Stop()
+		a.receiveServer = nil
+	}
+	a.isReceiving = false
 	a.tunnelManager.Stop()
 
 	// Assign unique 6-digit random codes to each file and bundle
@@ -508,3 +528,206 @@ func formatBytes(b int64) string {
 func getLocalIPs(port int) []string {
 	return []string{fmt.Sprintf("http://127.0.0.1:%d", port)}
 }
+
+// StartReceive initiates the local receiver server and Cloudflare tunnel for incoming transfers
+func (a *App) StartReceive() (*ReceiveResult, error) {
+	// 1. Ensure cloudflared is ready (downloads with progress if missing)
+	if _, err := a.EnsureCloudflared(); err != nil {
+		return nil, err
+	}
+
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	// Stop any existing share or receive
+	if a.server != nil {
+		a.server.Stop()
+		a.server = nil
+	}
+	if a.receiveServer != nil {
+		a.receiveServer.Stop()
+		a.receiveServer = nil
+	}
+	a.isReceiving = false
+	a.tunnelManager.Stop()
+
+	// 1. Check config for custom domain & fixed port
+	cfg := config.Load()
+	port := 0
+	if cfg.UseCustomDomain && cfg.FixedPort > 0 {
+		port = cfg.FixedPort
+	}
+	downloadDir := config.GetEffectiveDownloadDir(cfg)
+
+	// 2. Start Receiver Server
+	rcv, err := transfer.NewReceiveServer(downloadDir, port, transfer.ReceiveCallbacks{
+		OnProgress: func(p transfer.ReceiveProgress) {
+			if a.ctx != nil {
+				wailsRuntime.EventsEmit(a.ctx, "receive_file_progress", p)
+			}
+		},
+		OnFileDone: func(f transfer.ReceivedFile) {
+			if a.ctx != nil {
+				wailsRuntime.EventsEmit(a.ctx, "receive_file_completed", f)
+			}
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("fallo al iniciar servidor de recepción: %w", err)
+	}
+	a.receiveServer = rcv
+
+	// 3. Start Cloudflare Tunnel (Named Tunnel or Quick Tunnel)
+	var publicURL string
+	if cfg.UseCustomDomain && cfg.TunnelToken != "" && cfg.CustomDomain != "" {
+		publicURL, err = a.tunnelManager.StartWithToken(cfg.TunnelToken, cfg.CustomDomain)
+		if err != nil {
+			rcv.Stop()
+			a.receiveServer = nil
+			return nil, fmt.Errorf("fallo al iniciar túnel con dominio personalizado: %w", err)
+		}
+	} else {
+		publicURL, err = a.tunnelManager.Start(rcv.Port())
+		if err != nil {
+			rcv.Stop()
+			a.receiveServer = nil
+			return nil, fmt.Errorf("fallo al generar túnel de Cloudflare: %w", err)
+		}
+	}
+
+	a.isReceiving = true
+
+	localIPs := getLocalIPs(rcv.Port())
+
+	return &ReceiveResult{
+		PublicURL:   publicURL,
+		UploadURL:   publicURL,
+		LocalURLs:   localIPs,
+		DownloadDir: downloadDir,
+	}, nil
+}
+
+// StopReceive terminates the active receive session
+func (a *App) StopReceive() error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	if a.receiveServer != nil {
+		a.receiveServer.Stop()
+		a.receiveServer = nil
+	}
+
+	a.tunnelManager.Stop()
+	a.isReceiving = false
+
+	if a.ctx != nil {
+		wailsRuntime.EventsEmit(a.ctx, "receive_stopped", true)
+	}
+
+	return nil
+}
+
+// GetDownloadDir returns the active download folder path
+func (a *App) GetDownloadDir() string {
+	cfg := config.Load()
+	return config.GetEffectiveDownloadDir(cfg)
+}
+
+// SetDownloadDir sets and saves a new download directory path
+func (a *App) SetDownloadDir(dir string) error {
+	dir = strings.TrimSpace(dir)
+	if dir == "" {
+		dir = config.DefaultDownloadDir()
+	}
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return fmt.Errorf("no se pudo acceder a la carpeta: %w", err)
+	}
+
+	cfg := config.Load()
+	cfg.DownloadDir = dir
+	if err := config.Save(cfg); err != nil {
+		return err
+	}
+
+	a.mu.Lock()
+	if a.receiveServer != nil {
+		_ = a.receiveServer.SetDownloadDir(dir)
+	}
+	a.mu.Unlock()
+
+	return nil
+}
+
+// SelectDownloadDir opens native directory selection dialog and persists the choice
+func (a *App) SelectDownloadDir() (string, error) {
+	current := a.GetDownloadDir()
+	chosen, err := wailsRuntime.OpenDirectoryDialog(a.ctx, wailsRuntime.OpenDialogOptions{
+		Title:            "Seleccionar carpeta de descargas",
+		DefaultDirectory: current,
+	})
+	if err != nil {
+		return "", fmt.Errorf("error al abrir selector de carpetas: %w", err)
+	}
+	if chosen == "" {
+		return current, nil
+	}
+
+	if err := a.SetDownloadDir(chosen); err != nil {
+		return "", err
+	}
+	return chosen, nil
+}
+
+// OpenDownloadDir opens the current download folder in the system file manager
+func (a *App) OpenDownloadDir() error {
+	dir := a.GetDownloadDir()
+	_ = os.MkdirAll(dir, 0755)
+
+	if runtime.GOOS == "windows" {
+		cmd := exec.Command("explorer", filepath.Clean(dir))
+		return cmd.Start()
+	} else if runtime.GOOS == "darwin" {
+		cmd := exec.Command("open", dir)
+		return cmd.Start()
+	}
+	cmd := exec.Command("xdg-open", dir)
+	return cmd.Start()
+}
+
+// OpenFile opens a file with the system default program
+func (a *App) OpenFile(filePath string) error {
+	filePath = filepath.Clean(filePath)
+	if _, err := os.Stat(filePath); err != nil {
+		return fmt.Errorf("archivo no encontrado: %w", err)
+	}
+
+	if runtime.GOOS == "windows" {
+		cmd := exec.Command("cmd", "/c", "start", "", filePath)
+		return cmd.Start()
+	} else if runtime.GOOS == "darwin" {
+		cmd := exec.Command("open", filePath)
+		return cmd.Start()
+	}
+	cmd := exec.Command("xdg-open", filePath)
+	return cmd.Start()
+}
+
+// ShowFileInFolder opens the system file manager and selects/highlights the file
+func (a *App) ShowFileInFolder(filePath string) error {
+	filePath = filepath.Clean(filePath)
+	if _, err := os.Stat(filePath); err != nil {
+		return fmt.Errorf("archivo no encontrado: %w", err)
+	}
+
+	if runtime.GOOS == "windows" {
+		cmd := exec.Command("explorer", fmt.Sprintf("/select,%s", filePath))
+		return cmd.Start()
+	} else if runtime.GOOS == "darwin" {
+		cmd := exec.Command("open", "-R", filePath)
+		return cmd.Start()
+	}
+	dir := filepath.Dir(filePath)
+	cmd := exec.Command("xdg-open", dir)
+	return cmd.Start()
+}
+

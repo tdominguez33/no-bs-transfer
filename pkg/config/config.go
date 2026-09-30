@@ -16,6 +16,7 @@ type AppConfig struct {
 	TunnelToken     string `json:"tunnelToken"`
 	FixedPort       int    `json:"fixedPort"`
 	SavePortable    bool   `json:"savePortable"`
+	DownloadDir     string `json:"downloadDir"`
 	WindowWidth     int    `json:"windowWidth,omitempty"`
 	WindowHeight    int    `json:"windowHeight,omitempty"`
 }
@@ -163,6 +164,29 @@ func CleanDomainHost(raw string) string {
 	return strings.TrimSpace(raw)
 }
 
+// DefaultDownloadDir returns the user's Downloads directory, or home directory as fallback
+func DefaultDownloadDir() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "."
+	}
+	downloads := filepath.Join(home, "Downloads")
+	if info, err := os.Stat(downloads); err == nil && info.IsDir() {
+		return downloads
+	}
+	return home
+}
+
+// GetEffectiveDownloadDir returns the validated download directory
+func GetEffectiveDownloadDir(cfg *AppConfig) string {
+	if cfg != nil && cfg.DownloadDir != "" {
+		if info, err := os.Stat(cfg.DownloadDir); err == nil && info.IsDir() {
+			return cfg.DownloadDir
+		}
+	}
+	return DefaultDownloadDir()
+}
+
 // Load reads the configuration from disk:
 // 1. If portable mode is active (portable.txt marker), ONLY uses the portable folder and completely ignores %LOCALAPPDATA%.
 // 2. If a local config.json exists next to executable, it reads it.
@@ -178,6 +202,7 @@ func Load() *AppConfig {
 		TunnelToken:     "",
 		FixedPort:       56789,
 		SavePortable:    false,
+		DownloadDir:     DefaultDownloadDir(),
 		WindowWidth:     960,
 		WindowHeight:    720,
 	}
@@ -190,6 +215,9 @@ func Load() *AppConfig {
 			if err := json.Unmarshal(data, cfg); err == nil {
 				cfg.SavePortable = true
 				cfg.CustomDomain = CleanDomainHost(cfg.CustomDomain)
+				if cfg.DownloadDir == "" {
+					cfg.DownloadDir = DefaultDownloadDir()
+				}
 				if cfg.FixedPort <= 0 {
 					cfg.FixedPort = 56789
 				}
@@ -216,6 +244,9 @@ func Load() *AppConfig {
 		if err := json.Unmarshal(data, cfg); err == nil {
 			cfg.SavePortable = false
 			cfg.CustomDomain = CleanDomainHost(cfg.CustomDomain)
+			if cfg.DownloadDir == "" {
+				cfg.DownloadDir = DefaultDownloadDir()
+			}
 			if cfg.FixedPort <= 0 {
 				cfg.FixedPort = 56789
 			}
@@ -239,6 +270,10 @@ func Save(cfg *AppConfig) error {
 
 	// Clean domain: strip protocol, paths, and trailing slashes so it's always stored without https://
 	cfg.CustomDomain = CleanDomainHost(cfg.CustomDomain)
+
+	if cfg.DownloadDir == "" {
+		cfg.DownloadDir = DefaultDownloadDir()
+	}
 
 	if cfg.FixedPort <= 0 {
 		cfg.FixedPort = 56789
