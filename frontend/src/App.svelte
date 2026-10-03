@@ -132,6 +132,7 @@
   let isStartingReceive = $state(false);
   let isStoppingReceive = $state(false);
   let receiveResult = $state<main.ReceiveResult | null>(null);
+  let receiveQrSvg = $state('');
   let receiveQrDataUrl = $state('');
   let receiveQrTarget = $state<'internet' | 'local'>('internet');
   let receivedFiles = $state<ReceivedFile[]>([]);
@@ -157,6 +158,7 @@
     internetUrl: string;
     localUrl: string;
     activeTarget: 'internet' | 'local';
+    qrSvg: string;
     qrDataUrl: string;
     canToggle: boolean;
   }>({
@@ -165,6 +167,7 @@
     internetUrl: '',
     localUrl: '',
     activeTarget: 'internet',
+    qrSvg: '',
     qrDataUrl: '',
     canToggle: false
   });
@@ -243,15 +246,6 @@
   function toggleTheme() {
     isDark = !isDark;
     applyTheme(isDark);
-    if (qrModal.show) {
-      const currentUrl = qrModal.activeTarget === 'local' ? (qrModal.localUrl || qrModal.internetUrl) : (qrModal.internetUrl || qrModal.localUrl);
-      if (currentUrl) {
-        openQR(qrModal.title, qrModal.internetUrl, qrModal.localUrl);
-      }
-    }
-    if (receiveResult) {
-      generateReceiveQR(getActiveReceiveUrl());
-    }
     try {
       localStorage.setItem('nbs_theme', isDark ? 'dark' : 'light');
     } catch {}
@@ -517,6 +511,7 @@
     EventsOn('receive_stopped', () => {
       isReceiving = false;
       receiveResult = null;
+      receiveQrSvg = '';
       receiveQrDataUrl = '';
     });
 
@@ -801,14 +796,17 @@
   async function generateReceiveQR(url: string) {
     if (!url) return;
     try {
-      receiveQrDataUrl = await QRCode.toDataURL(url, {
-        width: 450,
+      const rawSvg = await QRCode.toString(url, {
+        type: 'svg',
         margin: 1.5,
         color: {
-          dark: isDark ? '#ffffff' : '#09090b',
-          light: isDark ? '#09090b' : '#ffffff'
+          dark: '#000000',
+          light: '#00000000'
         }
       });
+      receiveQrSvg = rawSvg
+        .replace(/stroke="#000000"/g, 'stroke="currentColor"')
+        .replace('<svg ', '<svg class="w-full h-full block" ');
     } catch (e) {
       console.error('Error generating receive QR:', e);
     }
@@ -848,6 +846,7 @@
       await StopReceive();
       isReceiving = false;
       receiveResult = null;
+      receiveQrSvg = '';
       receiveQrDataUrl = '';
       receiveQrTarget = 'internet';
     } catch (err: any) {
@@ -994,21 +993,26 @@
 
     const currentUrl = activeTarget === 'local' ? (localUrl || internetUrl) : (internetUrl || localUrl);
     try {
-      const qrDataUrl = await QRCode.toDataURL(currentUrl, {
-        width: 450,
+      const rawSvg = await QRCode.toString(currentUrl, {
+        type: 'svg',
         margin: 1.5,
         color: {
-          dark: isDark ? '#ffffff' : '#09090b',
-          light: isDark ? '#09090b' : '#ffffff'
+          dark: '#000000',
+          light: '#00000000'
         }
       });
+      const qrSvg = rawSvg
+        .replace(/stroke="#000000"/g, 'stroke="currentColor"')
+        .replace('<svg ', '<svg class="w-full h-full block" ');
+
       qrModal = {
         show: true,
         title,
         internetUrl,
         localUrl,
         activeTarget,
-        qrDataUrl,
+        qrSvg,
+        qrDataUrl: '',
         canToggle
       };
     } catch (err) {
@@ -1021,16 +1025,20 @@
     const nextTarget: 'internet' | 'local' = qrModal.activeTarget === 'internet' ? 'local' : 'internet';
     const nextUrl = nextTarget === 'local' ? qrModal.localUrl : qrModal.internetUrl;
     try {
-      const nextQr = await QRCode.toDataURL(nextUrl, {
-        width: 450,
+      const rawSvg = await QRCode.toString(nextUrl, {
+        type: 'svg',
         margin: 1.5,
         color: {
-          dark: isDark ? '#ffffff' : '#09090b',
-          light: isDark ? '#09090b' : '#ffffff'
+          dark: '#000000',
+          light: '#00000000'
         }
       });
+      const nextQrSvg = rawSvg
+        .replace(/stroke="#000000"/g, 'stroke="currentColor"')
+        .replace('<svg ', '<svg class="w-full h-full block" ');
+
       qrModal.activeTarget = nextTarget;
-      qrModal.qrDataUrl = nextQr;
+      qrModal.qrSvg = nextQrSvg;
     } catch (err) {
       console.error('Error al alternar código QR:', err);
     }
@@ -2096,15 +2104,13 @@
                     <button
                       type="button"
                       onclick={() => openQR('Cargar archivos', receiveResult?.uploadUrl || '', receiveResult?.localUploadUrl || '')}
-                      class="bg-white p-2 rounded-xl border border-zinc-200 dark:border-zinc-800 shadow-xs cursor-pointer hover:border-zinc-400 dark:hover:border-zinc-600 transition-colors"
+                      class="bg-white dark:bg-zinc-950 p-2 rounded-xl border border-zinc-200 dark:border-zinc-800 shadow-xs cursor-pointer hover:border-zinc-400 dark:hover:border-zinc-600 transition-colors flex items-center justify-center text-zinc-950 dark:text-zinc-50"
                       title="Ampliar código QR"
                     >
-                      {#if receiveQrDataUrl}
-                        <img
-                          src={receiveQrDataUrl}
-                          alt="Código QR para subir archivos"
-                          class="w-28 h-28 sm:w-32 sm:h-32 object-contain aspect-square select-none pointer-events-none"
-                        />
+                      {#if receiveQrSvg}
+                        <div class="w-28 h-28 sm:w-32 sm:h-32 flex items-center justify-center">
+                          {@html receiveQrSvg}
+                        </div>
                       {/if}
                     </button>
 
@@ -2354,13 +2360,21 @@
           </div>
 
           <!-- Area below title with matching background and QR directly inside -->
-          <div class="bg-white dark:bg-zinc-950 p-4 flex flex-col items-center justify-center w-full flex-1">
-            <img
-              src={qrModal.qrDataUrl}
-              alt="QR Code"
+          <div class="bg-white dark:bg-zinc-950 p-4 flex flex-col items-center justify-center w-full flex-1 text-zinc-950 dark:text-zinc-50">
+            <div
               style="height: clamp(160px, 60vh, 320px); width: clamp(160px, 60vh, 320px);"
-              class="object-contain aspect-square select-none pointer-events-none"
-            />
+              class="aspect-square select-none pointer-events-none flex items-center justify-center"
+            >
+              {#if qrModal.qrSvg}
+                {@html qrModal.qrSvg}
+              {:else if qrModal.qrDataUrl}
+                <img
+                  src={qrModal.qrDataUrl}
+                  alt="QR Code"
+                  class="w-full h-full object-contain"
+                />
+              {/if}
+            </div>
 
             <!-- Toggle QR Target button if both exist -->
             {#if qrModal.canToggle}
