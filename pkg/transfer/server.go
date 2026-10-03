@@ -48,9 +48,9 @@ func NewServer(files []*SharedFile, bundleCode string, fixedPort int, onUpdate f
 		return nil, fmt.Errorf("no se especificaron archivos para compartir")
 	}
 
-	listenAddr := "127.0.0.1:0"
+	listenAddr := "0.0.0.0:0"
 	if fixedPort > 0 {
-		listenAddr = fmt.Sprintf("127.0.0.1:%d", fixedPort)
+		listenAddr = fmt.Sprintf("0.0.0.0:%d", fixedPort)
 	}
 
 	listener, err := net.Listen("tcp", listenAddr)

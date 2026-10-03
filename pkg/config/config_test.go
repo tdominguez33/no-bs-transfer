@@ -189,3 +189,32 @@ func TestDownloadDir(t *testing.T) {
 		t.Errorf("GetEffectiveDownloadDir() with tmpDir = %q; want %q", eff, tmpDir)
 	}
 }
+
+func TestNetworkModeConfig(t *testing.T) {
+	tmpDir := t.TempDir()
+	SetExeDirOverride(tmpDir)
+	defer SetExeDirOverride("")
+
+	markerPath := filepath.Join(tmpDir, "portable.txt")
+	if err := os.WriteFile(markerPath, []byte(""), 0644); err != nil {
+		t.Fatalf("failed to create portable.txt: %v", err)
+	}
+
+	// 1. Default should be NetworkModeBoth
+	cfg := Load()
+	if cfg.NetworkMode != NetworkModeBoth {
+		t.Errorf("expected default NetworkMode = %q, got %q", NetworkModeBoth, cfg.NetworkMode)
+	}
+
+	// 2. Save LAN only mode
+	cfg.NetworkMode = NetworkModeLANOnly
+	if err := Save(cfg); err != nil {
+		t.Fatalf("Save failed: %v", err)
+	}
+
+	// 3. Reload and verify
+	reloaded := Load()
+	if reloaded.NetworkMode != NetworkModeLANOnly {
+		t.Errorf("expected reloaded NetworkMode = %q, got %q", NetworkModeLANOnly, reloaded.NetworkMode)
+	}
+}

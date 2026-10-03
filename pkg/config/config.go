@@ -9,8 +9,15 @@ import (
 	"sync"
 )
 
+// Network mode constants
+const (
+	NetworkModeBoth    = "both"     // Red local + Internet
+	NetworkModeLANOnly = "lan_only" // Solo red local
+)
+
 // AppConfig stores user preferences and custom domain tunnel settings
 type AppConfig struct {
+	NetworkMode     string `json:"networkMode"`
 	UseCustomDomain bool   `json:"useCustomDomain"`
 	CustomDomain    string `json:"customDomain"`
 	TunnelToken     string `json:"tunnelToken"`
@@ -197,6 +204,7 @@ func Load() *AppConfig {
 
 	defaultAppData := GetAppDataConfigPath()
 	cfg := &AppConfig{
+		NetworkMode:     NetworkModeBoth,
 		UseCustomDomain: false,
 		CustomDomain:    "",
 		TunnelToken:     "",
@@ -215,6 +223,9 @@ func Load() *AppConfig {
 			if err := json.Unmarshal(data, cfg); err == nil {
 				cfg.SavePortable = true
 				cfg.CustomDomain = CleanDomainHost(cfg.CustomDomain)
+				if cfg.NetworkMode != NetworkModeLANOnly && cfg.NetworkMode != NetworkModeBoth {
+					cfg.NetworkMode = NetworkModeBoth
+				}
 				if cfg.DownloadDir == "" {
 					cfg.DownloadDir = DefaultDownloadDir()
 				}
@@ -244,6 +255,9 @@ func Load() *AppConfig {
 		if err := json.Unmarshal(data, cfg); err == nil {
 			cfg.SavePortable = false
 			cfg.CustomDomain = CleanDomainHost(cfg.CustomDomain)
+			if cfg.NetworkMode != NetworkModeLANOnly && cfg.NetworkMode != NetworkModeBoth {
+				cfg.NetworkMode = NetworkModeBoth
+			}
 			if cfg.DownloadDir == "" {
 				cfg.DownloadDir = DefaultDownloadDir()
 			}

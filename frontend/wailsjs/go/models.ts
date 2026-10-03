@@ -1,6 +1,7 @@
 export namespace config {
 	
 	export class AppConfig {
+	    networkMode: string;
 	    useCustomDomain: boolean;
 	    customDomain: string;
 	    tunnelToken: string;
@@ -16,6 +17,7 @@ export namespace config {
 	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.networkMode = source["networkMode"];
 	        this.useCustomDomain = source["useCustomDomain"];
 	        this.customDomain = source["customDomain"];
 	        this.tunnelToken = source["tunnelToken"];
@@ -50,6 +52,7 @@ export namespace main {
 	    name: string;
 	    size: string;
 	    directUrl: string;
+	    localUrl: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new FileShareItem(source);
@@ -61,14 +64,17 @@ export namespace main {
 	        this.name = source["name"];
 	        this.size = source["size"];
 	        this.directUrl = source["directUrl"];
+	        this.localUrl = source["localUrl"];
 	    }
 	}
 	export class MultiShareResult {
 	    publicBaseUrl: string;
 	    bundleUrl: string;
+	    localBundleUrl: string;
 	    files: FileShareItem[];
 	    localUrls: string[];
 	    totalSize: string;
+	    networkMode: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new MultiShareResult(source);
@@ -78,9 +84,11 @@ export namespace main {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.publicBaseUrl = source["publicBaseUrl"];
 	        this.bundleUrl = source["bundleUrl"];
+	        this.localBundleUrl = source["localBundleUrl"];
 	        this.files = this.convertValues(source["files"], FileShareItem);
 	        this.localUrls = source["localUrls"];
 	        this.totalSize = source["totalSize"];
+	        this.networkMode = source["networkMode"];
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -104,8 +112,10 @@ export namespace main {
 	export class ReceiveResult {
 	    publicUrl: string;
 	    uploadUrl: string;
+	    localUploadUrl: string;
 	    localUrls: string[];
 	    downloadDir: string;
+	    networkMode: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new ReceiveResult(source);
@@ -115,8 +125,10 @@ export namespace main {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.publicUrl = source["publicUrl"];
 	        this.uploadUrl = source["uploadUrl"];
+	        this.localUploadUrl = source["localUploadUrl"];
 	        this.localUrls = source["localUrls"];
 	        this.downloadDir = source["downloadDir"];
+	        this.networkMode = source["networkMode"];
 	    }
 	}
 

@@ -11,6 +11,8 @@
     CopyToClipboard,
     GetConfig,
     SaveConfig,
+    GetNetworkMode,
+    SetNetworkMode,
     GetCloudflaredStatus,
     DownloadCloudflared,
     CancelCloudflaredDownload,
@@ -44,6 +46,7 @@
     GripVertical,
     Settings,
     Globe,
+    EthernetPort,
     Eye,
     EyeOff,
     CornerDownLeft,
@@ -110,6 +113,7 @@
 
   // Configuration State
   let configState = $state<config.AppConfig>({
+    networkMode: 'both',
     useCustomDomain: false,
     customDomain: '',
     tunnelToken: '',
@@ -129,6 +133,7 @@
   let isStoppingReceive = $state(false);
   let receiveResult = $state<main.ReceiveResult | null>(null);
   let receiveQrDataUrl = $state('');
+  let receiveQrTarget = $state<'internet' | 'local'>('internet');
   let receivedFiles = $state<ReceivedFile[]>([]);
   let activeUploads = $state<Record<string, ReceiveProgress>>({});
   let itemWarnings = $state<Record<string, string>>({});
@@ -142,16 +147,26 @@
   let isAddingMore = $state(false);
   let isStopping = $state(false);
   let shareResult = $state<main.MultiShareResult | null>(null);
-
-  // Sharing Mode: 'individual' (link per file, default) vs 'bundle' (single link for all)
-  let linkViewMode = $state<'bundle' | 'individual'>('individual');
+  let shareLinkTarget = $state<'internet' | 'local'>('internet');
+  let isIndividualLinksExpanded = $state(false);
 
   // QR Modal State
-  let qrModal = $state<{ show: boolean; title: string; url: string; qrDataUrl: string }>({
+  let qrModal = $state<{
+    show: boolean;
+    title: string;
+    internetUrl: string;
+    localUrl: string;
+    activeTarget: 'internet' | 'local';
+    qrDataUrl: string;
+    canToggle: boolean;
+  }>({
     show: false,
     title: '',
-    url: '',
-    qrDataUrl: ''
+    internetUrl: '',
+    localUrl: '',
+    activeTarget: 'internet',
+    qrDataUrl: '',
+    canToggle: false
   });
 
   // Delete Confirmation Modal State
@@ -228,11 +243,14 @@
   function toggleTheme() {
     isDark = !isDark;
     applyTheme(isDark);
-    if (qrModal.show && qrModal.url) {
-      openQR(qrModal.title, qrModal.url);
+    if (qrModal.show) {
+      const currentUrl = qrModal.activeTarget === 'local' ? (qrModal.localUrl || qrModal.internetUrl) : (qrModal.internetUrl || qrModal.localUrl);
+      if (currentUrl) {
+        openQR(qrModal.title, qrModal.internetUrl, qrModal.localUrl);
+      }
     }
-    if (receiveResult && receiveResult.uploadUrl) {
-      generateReceiveQR(receiveResult.uploadUrl);
+    if (receiveResult) {
+      generateReceiveQR(getActiveReceiveUrl());
     }
     try {
       localStorage.setItem('nbs_theme', isDark ? 'dark' : 'light');
@@ -331,6 +349,7 @@
       const loaded = await GetConfig();
       if (loaded) {
         configState = {
+          networkMode: loaded.networkMode === 'lan_only' ? 'lan_only' : 'both',
           useCustomDomain: loaded.useCustomDomain || false,
           customDomain: cleanDomainInput(loaded.customDomain || ''),
           tunnelToken: loaded.tunnelToken || '',
@@ -340,6 +359,7 @@
         };
         defaultDownloadDir = loaded.downloadDir || '';
         lastSavedConfigJSON = JSON.stringify({
+          networkMode: configState.networkMode,
           useCustomDomain: configState.useCustomDomain,
           customDomain: configState.customDomain,
           tunnelToken: configState.tunnelToken,
@@ -350,6 +370,23 @@
       }
     } catch (err: any) {
       console.error('Error al cargar configuración:', err);
+    }
+  }
+
+  async function handleNetworkModeChange(mode: 'both' | 'lan_only') {
+    if (configState.networkMode === mode) return;
+    configState.networkMode = mode;
+    try {
+      await SetNetworkMode(mode);
+      if (lastSavedConfigJSON) {
+        try {
+          const parsed = JSON.parse(lastSavedConfigJSON);
+          parsed.networkMode = mode;
+          lastSavedConfigJSON = JSON.stringify(parsed);
+        } catch {}
+      }
+    } catch (err: any) {
+      console.error('Error al cambiar modo de red:', err);
     }
   }
 
@@ -364,11 +401,13 @@
     const portVal = Number(configState.fixedPort);
     const toSave = {
       ...configState,
+      networkMode: configState.networkMode === 'lan_only' ? 'lan_only' : 'both',
       fixedPort: isNaN(portVal) || portVal < 1024 ? 56789 : Math.round(portVal),
       customDomain: cleanDomainInput(configState.customDomain),
       downloadDir: configState.downloadDir || ''
     };
     const currentJSON = JSON.stringify({
+      networkMode: toSave.networkMode,
       useCustomDomain: toSave.useCustomDomain,
       customDomain: toSave.customDomain,
       tunnelToken: toSave.tunnelToken,
@@ -457,6 +496,7 @@
     EventsOn('share_stopped', () => {
       isSharing = false;
       shareResult = null;
+      isIndividualLinksExpanded = false;
     });
 
     EventsOn('receive_file_progress', (p: ReceiveProgress) => {
@@ -703,7 +743,7 @@
     if (files.length === 0) return;
     errorMessage = '';
 
-    if (configState.useCustomDomain) {
+    if (configState.networkMode === 'both' && configState.useCustomDomain) {
       if (!configState.customDomain.trim() || !configState.tunnelToken.trim()) {
         errorMessage = 'Has activado dominio propio pero falta completar el dominio o el token en Configuración.';
         showConfig = true;
@@ -717,9 +757,10 @@
       const result = await StartShare(files);
       shareResult = result;
       isSharing = true;
-      linkViewMode = 'individual';
+      shareLinkTarget = result.networkMode === 'lan_only' ? 'local' : 'internet';
+      isIndividualLinksExpanded = false;
     } catch (err: any) {
-      errorMessage = err?.message || 'Error al iniciar el túnel de Cloudflare';
+      errorMessage = err?.message || 'Error al iniciar la transferencia';
       isSharing = false;
     } finally {
       isStarting = false;
@@ -733,12 +774,28 @@
       await StopShare();
       isSharing = false;
       shareResult = null;
+      shareLinkTarget = 'internet';
+      isIndividualLinksExpanded = false;
       stats = { totalSpeed: 0, totalBytesSent: 0, activeGuests: 0, transfers: [] };
     } catch (err: any) {
       errorMessage = err?.message || 'Error al detener la sesión';
     } finally {
       isStopping = false;
     }
+  }
+
+  function getActiveReceiveUrl(): string {
+    if (!receiveResult) return '';
+    if (receiveResult.networkMode === 'lan_only' || receiveQrTarget === 'local') {
+      return receiveResult.localUploadUrl || receiveResult.uploadUrl;
+    }
+    return receiveResult.uploadUrl || receiveResult.localUploadUrl;
+  }
+
+  async function toggleReceiveQrTarget() {
+    if (!receiveResult || receiveResult.networkMode === 'lan_only') return;
+    receiveQrTarget = receiveQrTarget === 'internet' ? 'local' : 'internet';
+    await generateReceiveQR(getActiveReceiveUrl());
   }
 
   async function generateReceiveQR(url: string) {
@@ -759,7 +816,7 @@
 
   async function handleStartReceive() {
     errorMessage = '';
-    if (configState.useCustomDomain) {
+    if (configState.networkMode === 'both' && configState.useCustomDomain) {
       if (!configState.customDomain.trim() || !configState.tunnelToken.trim()) {
         errorMessage = 'Has activado dominio propio pero falta completar el dominio o el token en Configuración.';
         showConfig = true;
@@ -773,7 +830,8 @@
       if (res) {
         receiveResult = res;
         isReceiving = true;
-        await generateReceiveQR(res.uploadUrl);
+        receiveQrTarget = res.networkMode === 'lan_only' ? 'local' : 'internet';
+        await generateReceiveQR(getActiveReceiveUrl());
       }
     } catch (err: any) {
       errorMessage = err?.message || 'Error al iniciar el receptor de archivos';
@@ -791,6 +849,7 @@
       isReceiving = false;
       receiveResult = null;
       receiveQrDataUrl = '';
+      receiveQrTarget = 'internet';
     } catch (err: any) {
       errorMessage = err?.message || 'Error al detener la recepción';
     } finally {
@@ -919,9 +978,23 @@
     }, 2000);
   }
 
-  async function openQR(title: string, url: string) {
+  async function openQR(title: string, internetUrl: string, localUrl: string = '') {
+    const isLanOnly = (configState.networkMode === 'lan_only') || (shareResult?.networkMode === 'lan_only') || (receiveResult?.networkMode === 'lan_only');
+    const isBothMode = (shareResult?.networkMode === 'both') || (receiveResult?.networkMode === 'both') || (configState.networkMode === 'both');
+    const hasInternet = Boolean(internetUrl && internetUrl.trim() !== '');
+    const hasLocal = Boolean(localUrl && localUrl.trim() !== '');
+    const canToggle = !isLanOnly && isBothMode && hasInternet && hasLocal && (internetUrl !== localUrl);
+
+    let activeTarget: 'internet' | 'local' = 'internet';
+    if (!hasInternet || isLanOnly) {
+      activeTarget = 'local';
+    } else if (shareLinkTarget === 'local' && hasLocal) {
+      activeTarget = 'local';
+    }
+
+    const currentUrl = activeTarget === 'local' ? (localUrl || internetUrl) : (internetUrl || localUrl);
     try {
-      const qrDataUrl = await QRCode.toDataURL(url, {
+      const qrDataUrl = await QRCode.toDataURL(currentUrl, {
         width: 450,
         margin: 1.5,
         color: {
@@ -929,10 +1002,54 @@
           light: isDark ? '#09090b' : '#ffffff'
         }
       });
-      qrModal = { show: true, title, url, qrDataUrl };
+      qrModal = {
+        show: true,
+        title,
+        internetUrl,
+        localUrl,
+        activeTarget,
+        qrDataUrl,
+        canToggle
+      };
     } catch (err) {
       errorMessage = 'Error al generar el código QR';
     }
+  }
+
+  async function toggleModalQrTarget() {
+    if (!qrModal.canToggle || !qrModal.internetUrl || !qrModal.localUrl) return;
+    const nextTarget: 'internet' | 'local' = qrModal.activeTarget === 'internet' ? 'local' : 'internet';
+    const nextUrl = nextTarget === 'local' ? qrModal.localUrl : qrModal.internetUrl;
+    try {
+      const nextQr = await QRCode.toDataURL(nextUrl, {
+        width: 450,
+        margin: 1.5,
+        color: {
+          dark: isDark ? '#ffffff' : '#09090b',
+          light: isDark ? '#09090b' : '#ffffff'
+        }
+      });
+      qrModal.activeTarget = nextTarget;
+      qrModal.qrDataUrl = nextQr;
+    } catch (err) {
+      console.error('Error al alternar código QR:', err);
+    }
+  }
+
+  function getActiveFileUrl(file: main.FileShareItem): string {
+    if (!file) return '';
+    if (shareResult?.networkMode === 'lan_only' || shareLinkTarget === 'local') {
+      return file.localUrl || file.directUrl;
+    }
+    return file.directUrl || file.localUrl;
+  }
+
+  function getActiveBundleUrl(): string {
+    if (!shareResult) return '';
+    if (shareResult.networkMode === 'lan_only' || shareLinkTarget === 'local') {
+      return shareResult.localBundleUrl || shareResult.bundleUrl;
+    }
+    return shareResult.bundleUrl || shareResult.localBundleUrl;
   }
 
   function formatBytes(bytes: number): string {
@@ -975,12 +1092,40 @@
           no-bs-transfer
         </h1>
         <span class="text-xs px-2 py-0.5 rounded-md font-mono {isReceiving || isSharing ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20' : 'bg-zinc-100 dark:bg-zinc-900 text-zinc-500 dark:text-zinc-400 border border-zinc-200 dark:border-zinc-800'}">
-          {isReceiving || isSharing ? 'túnel activo' : 'túnel inactivo'}
+          {#if isReceiving || isSharing}
+            {configState.networkMode === 'lan_only' ? 'red local activa' : 'túnel activo'}
+          {:else}
+            {configState.networkMode === 'lan_only' ? 'red local inactiva' : 'túnel inactivo'}
+          {/if}
         </span>
       </div>
 
-      <!-- Action buttons: Settings & Theme Toggle -->
-      <div class="flex items-center gap-1">
+      <!-- Action buttons: Network Mode Toggle, Settings & Theme Toggle -->
+      <div class="flex items-center gap-1.5">
+        <!-- Network Mode Toggle in Top-Right Corner -->
+        <div class="inline-flex p-0.5 bg-zinc-200/70 dark:bg-zinc-800/70 rounded-lg border border-zinc-200 dark:border-zinc-700/60 shadow-2xs text-xs">
+          <button
+            type="button"
+            onclick={() => handleNetworkModeChange('lan_only')}
+            disabled={isSharing || isReceiving || isStarting || isStartingReceive || isStopping || isStoppingReceive}
+            class="px-2 py-1 rounded-md flex items-center gap-1.5 font-medium transition-all duration-150 cursor-pointer disabled:opacity-50 disabled:cursor-default {configState.networkMode === 'lan_only' ? 'bg-white dark:bg-zinc-900 text-emerald-600 dark:text-emerald-400 shadow-xs' : 'text-zinc-500 enabled:hover:text-zinc-800 dark:enabled:hover:text-zinc-200'}"
+          >
+            <EthernetPort class="w-3.5 h-3.5" />
+            <span class="hidden sm:inline">Red local</span>
+          </button>
+          <button
+            type="button"
+            onclick={() => handleNetworkModeChange('both')}
+            disabled={isSharing || isReceiving || isStarting || isStartingReceive || isStopping || isStoppingReceive}
+            class="px-2 py-1 rounded-md flex items-center gap-1.5 font-medium transition-all duration-150 cursor-pointer disabled:opacity-50 disabled:cursor-default {configState.networkMode === 'both' ? 'bg-white dark:bg-zinc-900 text-indigo-600 dark:text-indigo-400 shadow-xs' : 'text-zinc-500 enabled:hover:text-zinc-800 dark:enabled:hover:text-zinc-200'}"
+          >
+            <Globe class="w-3.5 h-3.5" />
+            <span class="hidden sm:inline">Internet</span>
+          </button>
+        </div>
+
+        <div class="h-4 w-px bg-zinc-200 dark:bg-zinc-800 mx-0.5"></div>
+
         <!-- Settings Button -->
         <button
           onclick={() => showConfig = !showConfig}
@@ -1015,7 +1160,7 @@
             type="button"
             onclick={() => switchMode('send')}
             disabled={isStarting || isStartingReceive || isStopping || isStoppingReceive}
-            class="px-4 py-1.5 rounded-lg text-xs font-semibold transition-all duration-150 flex items-center gap-1.5 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed {activeMode === 'send' ? 'bg-white dark:bg-zinc-900 text-zinc-900 dark:text-zinc-100 shadow-sm' : 'text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200'}"
+            class="px-4 py-1.5 rounded-lg text-xs font-semibold transition-all duration-150 flex items-center gap-1.5 cursor-pointer disabled:cursor-pointer {activeMode === 'send' ? 'bg-white dark:bg-zinc-900 text-zinc-900 dark:text-zinc-100 shadow-sm' : 'text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200'}"
           >
             <Upload class="w-3.5 h-3.5" />
             <span>Enviar</span>
@@ -1024,7 +1169,7 @@
             type="button"
             onclick={() => switchMode('receive')}
             disabled={isStarting || isStartingReceive || isStopping || isStoppingReceive}
-            class="px-4 py-1.5 rounded-lg text-xs font-semibold transition-all duration-150 flex items-center gap-1.5 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed {activeMode === 'receive' ? 'bg-white dark:bg-zinc-900 text-zinc-900 dark:text-zinc-100 shadow-sm' : 'text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200'}"
+            class="px-4 py-1.5 rounded-lg text-xs font-semibold transition-all duration-150 flex items-center gap-1.5 cursor-pointer disabled:cursor-pointer {activeMode === 'receive' ? 'bg-white dark:bg-zinc-900 text-zinc-900 dark:text-zinc-100 shadow-sm' : 'text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200'}"
           >
             <Download class="w-3.5 h-3.5" />
             <span>Recibir</span>
@@ -1532,7 +1677,7 @@
         <!-- Active Sharing Dashboard -->
         <div class="flex-1 flex flex-col gap-6 min-h-0 overflow-y-auto scrollbar-gutter-both">
           <div class="border border-zinc-200 dark:border-zinc-800 rounded-xl bg-white dark:bg-zinc-900/40 p-4 flex flex-col gap-4 shrink-0 shadow-xs">
-            <div class="grid grid-cols-[1fr_auto] sm:grid-cols-[auto_1fr_auto] items-center gap-y-2.5 gap-x-3 pb-3 border-b border-zinc-100 dark:border-zinc-800/60">
+            <div class="flex items-center justify-between gap-3 pb-3 border-b border-zinc-100 dark:border-zinc-800/60">
               <!-- Status text -->
               <div class="flex items-center gap-2">
                 <span class="h-2 w-2 rounded-full bg-emerald-500 animate-pulse"></span>
@@ -1541,8 +1686,8 @@
                 </span>
               </div>
 
-              <!-- Action buttons: Agregar & Detener (always in line with status) -->
-              <div class="flex items-center gap-2 justify-self-end sm:col-start-3">
+              <!-- Action buttons: Agregar & Detener -->
+              <div class="flex items-center gap-2 shrink-0">
                 <!-- Add More Files Button -->
                 <button
                   onclick={handleAddMoreToActive}
@@ -1574,46 +1719,53 @@
                   {/if}
                 </button>
               </div>
-
-              <!-- Show tabs ONLY if multiple files are shared: stays inline down to sm, drops to second row below sm -->
-              {#if (shareResult?.files.length ?? 0) > 1}
-                <div class="col-span-2 sm:col-span-1 sm:col-start-2 sm:row-start-1 justify-self-center flex items-center pt-0.5 sm:pt-0">
-                  <div class="flex items-center p-0.5 bg-zinc-100 dark:bg-zinc-800/80 rounded-lg text-xs font-medium">
-                    <button
-                      onclick={() => linkViewMode = 'individual'}
-                      class="px-3 py-1 rounded-md transition-colors cursor-pointer {linkViewMode === 'individual' ? 'bg-white dark:bg-zinc-900 text-zinc-900 dark:text-zinc-100 shadow-sm' : 'text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-200'}"
-                    >
-                      Por archivo
-                    </button>
-                    <button
-                      onclick={() => linkViewMode = 'bundle'}
-                      class="px-3 py-1 rounded-md transition-colors cursor-pointer {linkViewMode === 'bundle' ? 'bg-white dark:bg-zinc-900 text-zinc-900 dark:text-zinc-100 shadow-sm' : 'text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-200'}"
-                    >
-                      Enlace general
-                    </button>
-                  </div>
-                </div>
-              {/if}
             </div>
 
             <!-- Single File Mode: Directly show the direct link, no redundant tabs -->
             {#if (shareResult?.files.length ?? 0) === 1}
               {@const singleFile = shareResult!.files[0]}
               <div class="flex flex-col gap-2">
-                <div class="flex items-baseline text-xs text-zinc-500 dark:text-zinc-400 min-w-0 gap-1.5">
-                  <span class="shrink-0">Enlace directo para descargar</span>
-                  <strong class="text-zinc-800 dark:text-zinc-200 font-medium truncate min-w-0">{singleFile.name}</strong>
-                  <span class="shrink-0 font-mono text-zinc-400 text-xs">({singleFile.size}):</span>
+                <div class="flex items-center justify-between gap-2.5 flex-wrap">
+                  <div class="flex items-baseline text-xs text-zinc-500 dark:text-zinc-400 min-w-0 gap-1.5">
+                    <span class="shrink-0">Enlace directo para descargar</span>
+                    <strong class="text-zinc-800 dark:text-zinc-200 font-medium truncate min-w-0">{singleFile.name}</strong>
+                    <span class="shrink-0 font-mono text-zinc-400 text-xs">({singleFile.size}):</span>
+                  </div>
+                  {#if shareResult?.networkMode === 'both' && (shareResult?.bundleUrl || singleFile.directUrl)}
+                    <div class="flex items-center p-0.5 bg-zinc-100 dark:bg-zinc-800/80 rounded-lg text-xs font-medium shrink-0 ml-auto sm:ml-0">
+                      <button
+                        onclick={() => shareLinkTarget = 'local'}
+                        class="px-2 py-0.5 rounded-md transition-colors cursor-pointer flex items-center gap-1 {shareLinkTarget === 'local' ? 'bg-white dark:bg-zinc-900 text-emerald-600 dark:text-emerald-400 shadow-xs' : 'text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-200'}"
+                        title="Mostrar enlace y QR de Red Local"
+                      >
+                        <EthernetPort class="w-3 h-3" />
+                        <span>Red Local</span>
+                      </button>
+                      <button
+                        onclick={() => shareLinkTarget = 'internet'}
+                        class="px-2 py-0.5 rounded-md transition-colors cursor-pointer flex items-center gap-1 {shareLinkTarget === 'internet' ? 'bg-white dark:bg-zinc-900 text-indigo-600 dark:text-indigo-400 shadow-xs' : 'text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-200'}"
+                        title="Mostrar enlace y QR de Internet"
+                      >
+                        <Globe class="w-3 h-3" />
+                        <span>Internet</span>
+                      </button>
+                    </div>
+                  {:else if shareResult?.networkMode === 'lan_only'}
+                    <span class="text-[10px] font-medium px-1.5 py-0.5 rounded bg-emerald-50 dark:bg-emerald-950/30 text-emerald-600 dark:text-emerald-400 border border-emerald-200 dark:border-emerald-800/50 flex items-center gap-1 shrink-0 ml-auto sm:ml-0">
+                      <EthernetPort class="w-3 h-3" />
+                      <span>Red Local</span>
+                    </span>
+                  {/if}
                 </div>
                 <div class="flex items-center gap-2">
                   <input
                     type="text"
                     readonly
-                    value={formatDisplayUrl(singleFile.directUrl)}
+                    value={formatDisplayUrl(getActiveFileUrl(singleFile))}
                     class="flex-1 bg-zinc-50 dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 rounded-lg px-3 py-2 text-xs font-mono text-zinc-800 dark:text-zinc-200 outline-none select-all"
                   />
                   <button
-                    onclick={() => copyText(singleFile.id, singleFile.directUrl)}
+                    onclick={() => copyText(singleFile.id, getActiveFileUrl(singleFile))}
                     class="w-[5.75rem] justify-center py-2 bg-zinc-900 hover:bg-zinc-800 dark:bg-zinc-100 dark:hover:bg-zinc-200 text-white dark:text-zinc-900 text-xs font-medium rounded-lg transition-colors cursor-pointer flex items-center gap-1.5 shrink-0"
                   >
                     {#if copiedMap[singleFile.id]}
@@ -1625,7 +1777,7 @@
                     {/if}
                   </button>
                   <button
-                    onclick={() => openQR(singleFile.name, singleFile.directUrl)}
+                    onclick={() => openQR(singleFile.name, singleFile.directUrl, singleFile.localUrl)}
                     class="p-2 border border-zinc-200 dark:border-zinc-800 hover:bg-zinc-100 dark:hover:bg-zinc-800 text-zinc-600 dark:text-zinc-400 rounded-lg transition-colors cursor-pointer shrink-0"
                     title="Código QR"
                   >
@@ -1633,71 +1785,56 @@
                   </button>
                 </div>
               </div>
-            {:else if linkViewMode === 'bundle'}
-              <!-- Multi-File: Bundle Link -->
-              <div class="flex flex-col gap-2">
-                <div class="text-xs text-zinc-500 dark:text-zinc-400">
-                  Enlace general para descargar todos los archivos:
-                </div>
-                <div class="border border-zinc-200 dark:border-zinc-800 rounded-lg overflow-hidden bg-zinc-50/50 dark:bg-zinc-950/50 overflow-y-auto scrollbar-gutter-both">
-                  <div class="p-3 flex items-center justify-between gap-3 text-xs">
-                    <div class="min-w-0 flex-1">
-                      <div class="flex items-baseline gap-1.5 min-w-0 mb-0.5">
-                        <span class="font-medium text-zinc-900 dark:text-zinc-100 truncate min-w-0">Todos los archivos</span>
-                        <span class="font-normal font-mono text-zinc-400 text-xs shrink-0">({totalBundleSize})</span>
-                      </div>
-                      <div class="font-mono text-zinc-400 text-[11px] truncate">{formatDisplayUrl(shareResult?.bundleUrl || '')}</div>
-                    </div>
-                    <div class="flex items-center gap-1.5 shrink-0">
-                      <button
-                        onclick={() => copyText('bundle', shareResult?.bundleUrl || '')}
-                        class="w-[5.25rem] justify-center py-1.5 bg-zinc-100 dark:bg-zinc-800 hover:bg-zinc-200 dark:hover:bg-zinc-700 text-zinc-800 dark:text-zinc-200 font-medium rounded transition-colors cursor-pointer flex items-center gap-1 shrink-0"
-                      >
-                        {#if copiedMap['bundle']}
-                          <Check class="w-3 h-3" />
-                          Copiado
-                        {:else}
-                          <Copy class="w-3 h-3" />
-                          Copiar
-                        {/if}
-                      </button>
-                      <button
-                        onclick={() => openQR('Todos los archivos', shareResult?.bundleUrl || '')}
-                        class="p-1.5 border border-zinc-200 dark:border-zinc-700 hover:bg-zinc-200 dark:hover:bg-zinc-800 text-zinc-600 dark:text-zinc-400 rounded transition-colors cursor-pointer"
-                        title="Código QR"
-                      >
-                        <QrCode class="w-3.5 h-3.5" />
-                      </button>
-                      <!-- Spacer matching the remove button in individual file items to eliminate layout shifts -->
-                      <div class="p-1 shrink-0 invisible pointer-events-none select-none" aria-hidden="true">
-                        <X class="w-4 h-4" />
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              </div>
             {:else}
-              <!-- Multi-File: Individual Links per File -->
-              <div class="flex flex-col gap-2">
-                <div class="text-xs text-zinc-500 dark:text-zinc-400">
-                  Enlaces directos por archivo:
-                </div>
-                <div class="border border-zinc-200 dark:border-zinc-800 rounded-lg divide-y divide-zinc-100 dark:divide-zinc-800/60 overflow-hidden max-h-[220px] overflow-y-auto bg-zinc-50/50 dark:bg-zinc-950/50 scrollbar-gutter-both">
-                  {#each (shareResult?.files || []) as f}
+              <!-- Multi-File: First General Bundle Link, then Individual Links -->
+              <div class="flex flex-col gap-4">
+                <!-- Subsection 1: General Bundle Link -->
+                <div class="flex flex-col gap-2">
+                  <div class="flex items-center justify-between gap-2.5 flex-wrap">
+                    <span class="text-xs text-zinc-500 dark:text-zinc-400">
+                      Enlace general para descargar todos los archivos:
+                    </span>
+                    {#if shareResult?.networkMode === 'both' && (shareResult?.bundleUrl || (shareResult?.files && shareResult.files[0]?.directUrl))}
+                      <div class="flex items-center p-0.5 bg-zinc-100 dark:bg-zinc-800/80 rounded-lg text-xs font-medium shrink-0 ml-auto sm:ml-0">
+                        <button
+                          onclick={() => shareLinkTarget = 'local'}
+                          class="px-2 py-0.5 rounded-md transition-colors cursor-pointer flex items-center gap-1 {shareLinkTarget === 'local' ? 'bg-white dark:bg-zinc-900 text-emerald-600 dark:text-emerald-400 shadow-xs' : 'text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-200'}"
+                          title="Mostrar enlaces y QR de Red Local"
+                        >
+                          <EthernetPort class="w-3 h-3" />
+                          <span>Red Local</span>
+                        </button>
+                        <button
+                          onclick={() => shareLinkTarget = 'internet'}
+                          class="px-2 py-0.5 rounded-md transition-colors cursor-pointer flex items-center gap-1 {shareLinkTarget === 'internet' ? 'bg-white dark:bg-zinc-900 text-indigo-600 dark:text-indigo-400 shadow-xs' : 'text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-200'}"
+                          title="Mostrar enlaces y QR de Internet"
+                        >
+                          <Globe class="w-3 h-3" />
+                          <span>Internet</span>
+                        </button>
+                      </div>
+                    {:else if shareResult?.networkMode === 'lan_only'}
+                      <span class="text-[10px] font-medium px-1.5 py-0.5 rounded bg-emerald-50 dark:bg-emerald-950/30 text-emerald-600 dark:text-emerald-400 border border-emerald-200 dark:border-emerald-800/50 flex items-center gap-1 shrink-0 ml-auto sm:ml-0">
+                        <EthernetPort class="w-3 h-3" />
+                        <span>Red Local</span>
+                      </span>
+                    {/if}
+                  </div>
+                  <div class="border border-zinc-200 dark:border-zinc-800 rounded-lg overflow-hidden bg-zinc-50/50 dark:bg-zinc-950/50">
                     <div class="p-3 flex items-center justify-between gap-3 text-xs">
                       <div class="min-w-0 flex-1">
                         <div class="flex items-baseline gap-1.5 min-w-0 mb-0.5">
-                          <span class="font-medium text-zinc-900 dark:text-zinc-100 truncate min-w-0">{f.name}</span>
-                          <span class="font-normal font-mono text-zinc-400 text-xs shrink-0">({f.size})</span>
+                          <span class="font-medium text-zinc-900 dark:text-zinc-100 truncate min-w-0">Todos los archivos</span>
+                          <span class="font-normal font-mono text-zinc-400 text-xs shrink-0">({totalBundleSize})</span>
                         </div>
-                        <div class="font-mono text-zinc-400 text-[11px] truncate">{formatDisplayUrl(f.directUrl)}</div>
+                        <div class="font-mono text-zinc-400 text-[11px] truncate">{formatDisplayUrl(getActiveBundleUrl())}</div>
                       </div>
                       <div class="flex items-center gap-1.5 shrink-0">
                         <button
-                          onclick={() => copyText(f.id, f.directUrl)}
+                          onclick={() => copyText('bundle', getActiveBundleUrl())}
                           class="w-[5.25rem] justify-center py-1.5 bg-zinc-100 dark:bg-zinc-800 hover:bg-zinc-200 dark:hover:bg-zinc-700 text-zinc-800 dark:text-zinc-200 font-medium rounded transition-colors cursor-pointer flex items-center gap-1 shrink-0"
                         >
-                          {#if copiedMap[f.id]}
+                          {#if copiedMap['bundle']}
                             <Check class="w-3 h-3" />
                             Copiado
                           {:else}
@@ -1706,22 +1843,99 @@
                           {/if}
                         </button>
                         <button
-                          onclick={() => openQR(f.name, f.directUrl)}
+                          onclick={() => openQR('Todos los archivos', shareResult?.bundleUrl || '', shareResult?.localBundleUrl || '')}
                           class="p-1.5 border border-zinc-200 dark:border-zinc-700 hover:bg-zinc-200 dark:hover:bg-zinc-800 text-zinc-600 dark:text-zinc-400 rounded transition-colors cursor-pointer"
                           title="Código QR"
                         >
                           <QrCode class="w-3.5 h-3.5" />
                         </button>
+                        <!-- Spacer matching the remove button in individual file items to eliminate layout shifts -->
                         <button
-                          onclick={() => promptRemoveFile(f.id, f.name)}
-                          class="text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200 p-1 rounded cursor-pointer shrink-0"
-                          title="Quitar archivo"
+                          type="button"
+                          tabindex="-1"
+                          disabled
+                          class="p-1 rounded shrink-0 invisible pointer-events-none select-none"
+                          aria-hidden="true"
                         >
                           <X class="w-4 h-4" />
                         </button>
                       </div>
                     </div>
-                  {/each}
+                  </div>
+                </div>
+
+                <!-- Subsection 2: Individual Links per File (Collapsible) -->
+                <div class="flex flex-col">
+                  <button
+                    type="button"
+                    onclick={() => isIndividualLinksExpanded = !isIndividualLinksExpanded}
+                    class="flex items-center justify-between w-full text-xs text-zinc-500 hover:text-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-200 transition-colors cursor-pointer group text-left select-none py-1"
+                    aria-expanded={isIndividualLinksExpanded}
+                  >
+                    <div class="flex items-baseline gap-1.5">
+                      <span>Enlaces directos por archivo</span>
+                      <span class="text-xs text-zinc-400 dark:text-zinc-500">({shareResult?.files.length ?? 0})</span>
+                    </div>
+                    <div class="flex items-center gap-1 text-zinc-400 group-hover:text-zinc-600 dark:group-hover:text-zinc-300 transition-colors">
+                      <span class="text-[11px] font-normal">{isIndividualLinksExpanded ? 'Ocultar' : 'Mostrar'}</span>
+                      <ChevronDown class="w-3.5 h-3.5 transform transition-transform duration-250 ease-out {isIndividualLinksExpanded ? 'rotate-180' : 'rotate-0'}" />
+                    </div>
+                  </button>
+
+                  <!-- Collapsible Content with smooth CSS Grid transition -->
+                  <div
+                    class="grid"
+                    style="grid-template-rows: {isIndividualLinksExpanded ? '1fr' : '0fr'}; transition: grid-template-rows 250ms cubic-bezier(0.4, 0, 0.2, 1);"
+                  >
+                    <div class="min-h-0 overflow-hidden" inert={!isIndividualLinksExpanded ? true : undefined}>
+                      <div class="pt-2">
+                        <div
+                          class="border border-zinc-200 dark:border-zinc-800 rounded-lg divide-y divide-zinc-100 dark:divide-zinc-800/60 overflow-hidden max-h-[220px] overflow-y-auto bg-zinc-50/50 dark:bg-zinc-950/50"
+                          style="scrollbar-gutter: auto;"
+                        >
+                          {#each (shareResult?.files || []) as f}
+                            <div class="p-3 flex items-center justify-between gap-3 text-xs">
+                              <div class="min-w-0 flex-1">
+                                <div class="flex items-baseline gap-1.5 min-w-0 mb-0.5">
+                                  <span class="font-medium text-zinc-900 dark:text-zinc-100 truncate min-w-0">{f.name}</span>
+                                  <span class="font-normal font-mono text-zinc-400 text-xs shrink-0">({f.size})</span>
+                                </div>
+                                <div class="font-mono text-zinc-400 text-[11px] truncate">{formatDisplayUrl(getActiveFileUrl(f))}</div>
+                              </div>
+                              <div class="flex items-center gap-1.5 shrink-0">
+                                <button
+                                  onclick={() => copyText(f.id, getActiveFileUrl(f))}
+                                  class="w-[5.25rem] justify-center py-1.5 bg-zinc-100 dark:bg-zinc-800 hover:bg-zinc-200 dark:hover:bg-zinc-700 text-zinc-800 dark:text-zinc-200 font-medium rounded transition-colors cursor-pointer flex items-center gap-1 shrink-0"
+                                >
+                                  {#if copiedMap[f.id]}
+                                    <Check class="w-3 h-3" />
+                                    Copiado
+                                  {:else}
+                                    <Copy class="w-3 h-3" />
+                                    Copiar
+                                  {/if}
+                                </button>
+                                <button
+                                  onclick={() => openQR(f.name, f.directUrl, f.localUrl)}
+                                  class="p-1.5 border border-zinc-200 dark:border-zinc-700 hover:bg-zinc-200 dark:hover:bg-zinc-800 text-zinc-600 dark:text-zinc-400 rounded transition-colors cursor-pointer"
+                                  title="Código QR"
+                                >
+                                  <QrCode class="w-3.5 h-3.5" />
+                                </button>
+                                <button
+                                  onclick={() => promptRemoveFile(f.id, f.name)}
+                                  class="text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200 p-1 rounded cursor-pointer shrink-0"
+                                  title="Quitar archivo"
+                                >
+                                  <X class="w-4 h-4" />
+                                </button>
+                              </div>
+                            </div>
+                          {/each}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
                 </div>
               </div>
             {/if}
@@ -1826,7 +2040,11 @@
                   Iniciando receptor de archivos...
                 </p>
                 <p class="text-xs text-zinc-500 dark:text-zinc-400 text-center leading-normal">
-                  Generando enlace público y código QR con Cloudflare
+                  {#if configState.networkMode === 'lan_only'}
+                    Iniciando receptor en la red local
+                  {:else}
+                    Generando enlace público y código QR con Cloudflare
+                  {/if}
                 </p>
               </div>
             </div>
@@ -1877,7 +2095,7 @@
                   <div class="shrink-0 flex flex-col items-center">
                     <button
                       type="button"
-                      onclick={() => openQR('Cargar archivos', receiveResult?.uploadUrl || '')}
+                      onclick={() => openQR('Cargar archivos', receiveResult?.uploadUrl || '', receiveResult?.localUploadUrl || '')}
                       class="bg-white p-2 rounded-xl border border-zinc-200 dark:border-zinc-800 shadow-xs cursor-pointer hover:border-zinc-400 dark:hover:border-zinc-600 transition-colors"
                       title="Ampliar código QR"
                     >
@@ -1889,7 +2107,24 @@
                         />
                       {/if}
                     </button>
-                    <span class="text-[10px] text-zinc-400 mt-1">Clic para ampliar</span>
+
+                    <!-- Button to switch QR code if in 'both' mode -->
+                    {#if receiveResult?.networkMode === 'both' && receiveResult?.uploadUrl}
+                      <button
+                        type="button"
+                        onclick={toggleReceiveQrTarget}
+                        class="mt-2 w-56 justify-center px-2.5 py-1 text-xs font-medium rounded-lg border border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-950 hover:bg-zinc-100 dark:hover:bg-zinc-900 text-zinc-700 dark:text-zinc-300 transition-colors flex items-center gap-1.5 cursor-pointer shadow-2xs whitespace-nowrap"
+                        title={receiveQrTarget === 'internet' ? 'Cambiar a QR Red Local' : 'Cambiar a QR Internet'}
+                      >
+                        {#if receiveQrTarget === 'internet'}
+                          <EthernetPort class="w-3.5 h-3.5 text-emerald-500" />
+                          <span>Cambiar a QR Red Local</span>
+                        {:else}
+                          <Globe class="w-3.5 h-3.5 text-indigo-500" />
+                          <span>Cambiar a QR Internet</span>
+                        {/if}
+                      </button>
+                    {/if}
                   </div>
 
                   <!-- Details & Link -->
@@ -1907,11 +2142,11 @@
                       <input
                         type="text"
                         readonly
-                        value={formatDisplayUrl(receiveResult.uploadUrl)}
+                        value={formatDisplayUrl(getActiveReceiveUrl())}
                         class="flex-1 bg-zinc-50 dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 rounded-lg px-3 py-1.5 text-xs font-mono text-zinc-800 dark:text-zinc-200 outline-none select-all min-w-0"
                       />
                       <button
-                        onclick={() => copyText('receive_url', receiveResult?.uploadUrl || '')}
+                        onclick={() => copyText('receive_url', getActiveReceiveUrl())}
                         class="w-[5.5rem] justify-center py-1.5 bg-zinc-900 hover:bg-zinc-800 dark:bg-zinc-100 dark:hover:bg-zinc-200 text-white dark:text-zinc-900 text-xs font-medium rounded-lg transition-colors cursor-pointer flex items-center gap-1.5 shrink-0"
                       >
                         {#if copiedMap['receive_url']}
@@ -2094,7 +2329,20 @@
         >
           <!-- Title header -->
           <div class="flex items-center justify-between w-full px-4 py-2 border-b border-zinc-100 dark:border-zinc-800/80 shrink-0 bg-zinc-50/60 dark:bg-zinc-900">
-            <h3 class="text-xs sm:text-sm font-semibold truncate text-zinc-900 dark:text-zinc-100 pr-2">{qrModal.title}</h3>
+            <div class="flex items-center gap-2 min-w-0 pr-2">
+              <h3 class="text-xs sm:text-sm font-semibold truncate text-zinc-900 dark:text-zinc-100">{qrModal.title}</h3>
+              {#if qrModal.activeTarget === 'local'}
+                <span class="text-[10px] font-medium px-1.5 py-0.5 rounded bg-emerald-50 dark:bg-emerald-950/30 text-emerald-600 dark:text-emerald-400 border border-emerald-200 dark:border-emerald-800/50 flex items-center gap-1 shrink-0">
+                  <EthernetPort class="w-3 h-3" />
+                  <span>Red Local</span>
+                </span>
+              {:else}
+                <span class="text-[10px] font-medium px-1.5 py-0.5 rounded bg-indigo-50 dark:bg-indigo-950/30 text-indigo-600 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-800/50 flex items-center gap-1 shrink-0">
+                  <Globe class="w-3 h-3" />
+                  <span>Internet</span>
+                </span>
+              {/if}
+            </div>
             <button
               onclick={() => qrModal.show = false}
               class="text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-200 cursor-pointer p-1 rounded-md shrink-0 transition-colors"
@@ -2106,13 +2354,31 @@
           </div>
 
           <!-- Area below title with matching background and QR directly inside -->
-          <div class="bg-white dark:bg-zinc-950 p-3 sm:p-4 flex items-center justify-center w-full flex-1">
+          <div class="bg-white dark:bg-zinc-950 p-4 flex flex-col items-center justify-center w-full flex-1">
             <img
               src={qrModal.qrDataUrl}
               alt="QR Code"
               style="height: clamp(160px, 60vh, 320px); width: clamp(160px, 60vh, 320px);"
               class="object-contain aspect-square select-none pointer-events-none"
             />
+
+            <!-- Toggle QR Target button if both exist -->
+            {#if qrModal.canToggle}
+              <button
+                type="button"
+                onclick={toggleModalQrTarget}
+                class="mt-3 w-56 justify-center px-3 py-1.5 text-xs font-medium rounded-lg border border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-900 hover:bg-zinc-100 dark:hover:bg-zinc-800 text-zinc-700 dark:text-zinc-300 transition-colors flex items-center gap-1.5 cursor-pointer shadow-xs whitespace-nowrap shrink-0"
+                title={qrModal.activeTarget === 'internet' ? 'Cambiar a QR Red Local' : 'Cambiar a QR Internet'}
+              >
+                {#if qrModal.activeTarget === 'internet'}
+                  <EthernetPort class="w-3.5 h-3.5 text-emerald-500" />
+                  <span>Cambiar a QR Red Local</span>
+                {:else}
+                  <Globe class="w-3.5 h-3.5 text-indigo-500" />
+                  <span>Cambiar a QR Internet</span>
+                {/if}
+              </button>
+            {/if}
           </div>
         </div>
       </div>

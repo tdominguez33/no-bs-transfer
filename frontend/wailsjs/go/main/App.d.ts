@@ -20,6 +20,8 @@ export function GetConfig():Promise<config.AppConfig>;
 
 export function GetDownloadDir():Promise<string>;
 
+export function GetNetworkMode():Promise<string>;
+
 export function LoadFilesFromPaths(arg1:Array<string>):Promise<Array<transfer.SharedFile>>;
 
 export function OpenDownloadDir():Promise<void>;
@@ -37,6 +39,8 @@ export function SelectDownloadDir():Promise<string>;
 export function SelectFiles():Promise<Array<transfer.SharedFile>>;
 
 export function SetDownloadDir(arg1:string):Promise<void>;
+
+export function SetNetworkMode(arg1:string):Promise<void>;
 
 export function ShowFileInFolder(arg1:string):Promise<void>;
 

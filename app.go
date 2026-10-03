@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -27,23 +28,28 @@ type FileShareItem struct {
 	Name      string `json:"name"`
 	Size      string `json:"size"`
 	DirectURL string `json:"directUrl"`
+	LocalURL  string `json:"localUrl"`
 }
 
 // MultiShareResult contains both the bundle URL and individual direct links
 type MultiShareResult struct {
-	PublicBaseURL string          `json:"publicBaseUrl"`
-	BundleURL     string          `json:"bundleUrl"`
-	Files         []FileShareItem `json:"files"`
-	LocalURLs     []string        `json:"localUrls"`
-	TotalSize     string          `json:"totalSize"`
+	PublicBaseURL  string          `json:"publicBaseUrl"`
+	BundleURL      string          `json:"bundleUrl"`
+	LocalBundleURL string          `json:"localBundleUrl"`
+	Files          []FileShareItem `json:"files"`
+	LocalURLs      []string        `json:"localUrls"`
+	TotalSize      string          `json:"totalSize"`
+	NetworkMode    string          `json:"networkMode"`
 }
 
 // ReceiveResult contains the public upload URL, local addresses, and destination directory
 type ReceiveResult struct {
-	PublicURL   string   `json:"publicUrl"`
-	UploadURL   string   `json:"uploadUrl"`
-	LocalURLs   []string `json:"localUrls"`
-	DownloadDir string   `json:"downloadDir"`
+	PublicURL      string   `json:"publicUrl"`
+	UploadURL      string   `json:"uploadUrl"`
+	LocalUploadURL string   `json:"localUploadUrl"`
+	LocalURLs      []string `json:"localUrls"`
+	DownloadDir    string   `json:"downloadDir"`
+	NetworkMode    string   `json:"networkMode"`
 }
 
 // CloudflaredStatus represents the installation status of cloudflared
@@ -259,7 +265,7 @@ func generate6DigitCode(existing map[string]bool) string {
 	}
 }
 
-// StartShare initiates the local server and Cloudflare tunnel for multiple files
+// StartShare initiates the local server and optionally Cloudflare tunnel for multiple files
 func (a *App) StartShare(files []*transfer.SharedFile) (*MultiShareResult, error) {
 	seenPaths := make(map[string]bool)
 	var uniqueFiles []*transfer.SharedFile
@@ -274,9 +280,17 @@ func (a *App) StartShare(files []*transfer.SharedFile) (*MultiShareResult, error
 	}
 	files = uniqueFiles
 
-	// 1. Ensure cloudflared is ready (downloads with progress if missing)
-	if _, err := a.EnsureCloudflared(); err != nil {
-		return nil, err
+	cfg := config.Load()
+	networkMode := cfg.NetworkMode
+	if networkMode != config.NetworkModeLANOnly && networkMode != config.NetworkModeBoth {
+		networkMode = config.NetworkModeBoth
+	}
+
+	// 1. Ensure cloudflared is ready only if we need Internet tunnel
+	if networkMode == config.NetworkModeBoth {
+		if _, err := a.EnsureCloudflared(); err != nil {
+			return nil, err
+		}
 	}
 
 	a.mu.Lock()
@@ -302,8 +316,7 @@ func (a *App) StartShare(files []*transfer.SharedFile) (*MultiShareResult, error
 	}
 	a.activeFiles = files
 
-	// 1. Check config for custom domain & fixed port
-	cfg := config.Load()
+	// Check config for custom domain & fixed port
 	port := 0
 	if cfg.UseCustomDomain && cfg.FixedPort > 0 {
 		port = cfg.FixedPort
@@ -320,48 +333,66 @@ func (a *App) StartShare(files []*transfer.SharedFile) (*MultiShareResult, error
 	}
 	a.server = srv
 
-	// 3. Start Cloudflare Tunnel (Named Tunnel or Quick Tunnel)
+	primaryLocal := getPrimaryLocalURL(srv.Port())
+	localBundleURL := fmt.Sprintf("%s/%s", primaryLocal, a.bundleCode)
+	localIPs := getLocalIPs(srv.Port())
+
+	// 3. Start Cloudflare Tunnel if networkMode == "both"
 	var publicURL string
-	if cfg.UseCustomDomain && cfg.TunnelToken != "" && cfg.CustomDomain != "" {
-		publicURL, err = a.tunnelManager.StartWithToken(cfg.TunnelToken, cfg.CustomDomain)
-		if err != nil {
-			srv.Stop()
-			a.server = nil
-			return nil, fmt.Errorf("fallo al iniciar túnel con dominio personalizado: %w", err)
-		}
-	} else {
-		publicURL, err = a.tunnelManager.Start(srv.Port())
-		if err != nil {
-			srv.Stop()
-			a.server = nil
-			return nil, fmt.Errorf("fallo al generar túnel de Cloudflare: %w", err)
+	if networkMode == config.NetworkModeBoth {
+		if cfg.UseCustomDomain && cfg.TunnelToken != "" && cfg.CustomDomain != "" {
+			publicURL, err = a.tunnelManager.StartWithToken(cfg.TunnelToken, cfg.CustomDomain)
+			if err != nil {
+				srv.Stop()
+				a.server = nil
+				return nil, fmt.Errorf("fallo al iniciar túnel con dominio personalizado: %w", err)
+			}
+		} else {
+			publicURL, err = a.tunnelManager.Start(srv.Port())
+			if err != nil {
+				srv.Stop()
+				a.server = nil
+				return nil, fmt.Errorf("fallo al generar túnel de Cloudflare: %w", err)
+			}
 		}
 	}
 
-	// Build direct links per file (directly /{code})
+	// Build direct links per file
 	var fileItems []FileShareItem
 	for _, f := range files {
+		directURL := ""
+		if publicURL != "" {
+			directURL = fmt.Sprintf("%s/%s", publicURL, f.ID)
+		}
+		localURL := fmt.Sprintf("%s/%s", primaryLocal, f.ID)
+
 		fileItems = append(fileItems, FileShareItem{
 			ID:        f.ID,
 			Name:      f.Name,
 			Size:      f.Size,
-			DirectURL: fmt.Sprintf("%s/%s", publicURL, f.ID),
+			DirectURL: directURL,
+			LocalURL:  localURL,
 		})
 	}
-
-	localIPs := getLocalIPs(srv.Port())
 
 	var totalBytes int64
 	for _, f := range files {
 		totalBytes += f.RawBytes
 	}
 
+	bundleURL := ""
+	if publicURL != "" {
+		bundleURL = fmt.Sprintf("%s/%s", publicURL, a.bundleCode)
+	}
+
 	return &MultiShareResult{
-		PublicBaseURL: publicURL,
-		BundleURL:     fmt.Sprintf("%s/%s", publicURL, a.bundleCode),
-		Files:         fileItems,
-		LocalURLs:     localIPs,
-		TotalSize:     formatBytes(totalBytes),
+		PublicBaseURL:  publicURL,
+		BundleURL:      bundleURL,
+		LocalBundleURL: localBundleURL,
+		Files:          fileItems,
+		LocalURLs:      localIPs,
+		TotalSize:      formatBytes(totalBytes),
+		NetworkMode:    networkMode,
 	}, nil
 }
 
@@ -370,7 +401,7 @@ func (a *App) AddFilesToShare(newFiles []*transfer.SharedFile) (*MultiShareResul
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
-	if a.server == nil || !a.tunnelManager.IsRunning() {
+	if a.server == nil {
 		return nil, fmt.Errorf("no hay sesión activa")
 	}
 
@@ -398,25 +429,52 @@ func (a *App) AddFilesToShare(newFiles []*transfer.SharedFile) (*MultiShareResul
 		a.server.AddFiles(added)
 	}
 
-	publicURL := a.tunnelManager.GetURL()
+	cfg := config.Load()
+	networkMode := cfg.NetworkMode
+	if networkMode != config.NetworkModeLANOnly && networkMode != config.NetworkModeBoth {
+		networkMode = config.NetworkModeBoth
+	}
+
+	var publicURL string
+	if a.tunnelManager.IsRunning() {
+		publicURL = a.tunnelManager.GetURL()
+	}
+
+	primaryLocal := getPrimaryLocalURL(a.server.Port())
+	localBundleURL := fmt.Sprintf("%s/%s", primaryLocal, a.bundleCode)
+
 	var fileItems []FileShareItem
 	var totalBytes int64
 	for _, f := range a.activeFiles {
 		totalBytes += f.RawBytes
+		directURL := ""
+		if publicURL != "" {
+			directURL = fmt.Sprintf("%s/%s", publicURL, f.ID)
+		}
+		localURL := fmt.Sprintf("%s/%s", primaryLocal, f.ID)
+
 		fileItems = append(fileItems, FileShareItem{
 			ID:        f.ID,
 			Name:      f.Name,
 			Size:      f.Size,
-			DirectURL: fmt.Sprintf("%s/%s", publicURL, f.ID),
+			DirectURL: directURL,
+			LocalURL:  localURL,
 		})
 	}
 
+	bundleURL := ""
+	if publicURL != "" {
+		bundleURL = fmt.Sprintf("%s/%s", publicURL, a.bundleCode)
+	}
+
 	return &MultiShareResult{
-		PublicBaseURL: publicURL,
-		BundleURL:     fmt.Sprintf("%s/%s", publicURL, a.bundleCode),
-		Files:         fileItems,
-		LocalURLs:     getLocalIPs(a.server.Port()),
-		TotalSize:     formatBytes(totalBytes),
+		PublicBaseURL:  publicURL,
+		BundleURL:      bundleURL,
+		LocalBundleURL: localBundleURL,
+		Files:          fileItems,
+		LocalURLs:      getLocalIPs(a.server.Port()),
+		TotalSize:      formatBytes(totalBytes),
+		NetworkMode:    networkMode,
 	}, nil
 }
 
@@ -425,7 +483,7 @@ func (a *App) RemoveFileFromShare(fileID string) (*MultiShareResult, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
-	if a.server == nil || !a.tunnelManager.IsRunning() {
+	if a.server == nil {
 		return nil, fmt.Errorf("no hay sesión activa")
 	}
 
@@ -461,26 +519,52 @@ func (a *App) RemoveFileFromShare(fileID string) (*MultiShareResult, error) {
 		}, nil
 	}
 
-	// 4. Return updated MultiShareResult
-	publicURL := a.tunnelManager.GetURL()
+	cfg := config.Load()
+	networkMode := cfg.NetworkMode
+	if networkMode != config.NetworkModeLANOnly && networkMode != config.NetworkModeBoth {
+		networkMode = config.NetworkModeBoth
+	}
+
+	var publicURL string
+	if a.tunnelManager.IsRunning() {
+		publicURL = a.tunnelManager.GetURL()
+	}
+
+	primaryLocal := getPrimaryLocalURL(a.server.Port())
+	localBundleURL := fmt.Sprintf("%s/%s", primaryLocal, a.bundleCode)
+
 	var fileItems []FileShareItem
 	var totalBytes int64
 	for _, f := range a.activeFiles {
 		totalBytes += f.RawBytes
+		directURL := ""
+		if publicURL != "" {
+			directURL = fmt.Sprintf("%s/%s", publicURL, f.ID)
+		}
+		localURL := fmt.Sprintf("%s/%s", primaryLocal, f.ID)
+
 		fileItems = append(fileItems, FileShareItem{
 			ID:        f.ID,
 			Name:      f.Name,
 			Size:      f.Size,
-			DirectURL: fmt.Sprintf("%s/%s", publicURL, f.ID),
+			DirectURL: directURL,
+			LocalURL:  localURL,
 		})
 	}
 
+	bundleURL := ""
+	if publicURL != "" {
+		bundleURL = fmt.Sprintf("%s/%s", publicURL, a.bundleCode)
+	}
+
 	return &MultiShareResult{
-		PublicBaseURL: publicURL,
-		BundleURL:     fmt.Sprintf("%s/%s", publicURL, a.bundleCode),
-		Files:         fileItems,
-		LocalURLs:     getLocalIPs(a.server.Port()),
-		TotalSize:     formatBytes(totalBytes),
+		PublicBaseURL:  publicURL,
+		BundleURL:      bundleURL,
+		LocalBundleURL: localBundleURL,
+		Files:          fileItems,
+		LocalURLs:      getLocalIPs(a.server.Port()),
+		TotalSize:      formatBytes(totalBytes),
+		NetworkMode:    networkMode,
 	}, nil
 }
 
@@ -526,14 +610,97 @@ func formatBytes(b int64) string {
 }
 
 func getLocalIPs(port int) []string {
-	return []string{fmt.Sprintf("http://127.0.0.1:%d", port)}
+	var prioritized []string
+	var secondary []string
+
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return []string{fmt.Sprintf("http://127.0.0.1:%d", port)}
+	}
+
+	for _, iface := range ifaces {
+		// Must be up and not loopback
+		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+
+		nameLower := strings.ToLower(iface.Name)
+		isVirtual := strings.Contains(nameLower, "vethernet") ||
+			strings.Contains(nameLower, "virtual") ||
+			strings.Contains(nameLower, "vmware") ||
+			strings.Contains(nameLower, "docker") ||
+			strings.Contains(nameLower, "wsl") ||
+			strings.Contains(nameLower, "hyper-v") ||
+			strings.Contains(nameLower, "tailscale") ||
+			strings.Contains(nameLower, "zerotier")
+
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+
+		for _, addr := range addrs {
+			var ip net.IP
+			switch v := addr.(type) {
+			case *net.IPNet:
+				ip = v.IP
+			case *net.IPAddr:
+				ip = v.IP
+			}
+			if ip == nil || ip.IsLoopback() {
+				continue
+			}
+
+			ip4 := ip.To4()
+			if ip4 == nil {
+				continue
+			}
+
+			// Exclude link-local / APIPA (169.254.x.x)
+			if ip4.IsLinkLocalUnicast() {
+				continue
+			}
+
+			// Only private IPs
+			if ip4.IsPrivate() {
+				url := fmt.Sprintf("http://%s:%d", ip4.String(), port)
+				if isVirtual {
+					secondary = append(secondary, url)
+				} else {
+					prioritized = append(prioritized, url)
+				}
+			}
+		}
+	}
+
+	results := append(prioritized, secondary...)
+	if len(results) == 0 {
+		return []string{fmt.Sprintf("http://127.0.0.1:%d", port)}
+	}
+	return results
 }
 
-// StartReceive initiates the local receiver server and Cloudflare tunnel for incoming transfers
+func getPrimaryLocalURL(port int) string {
+	ips := getLocalIPs(port)
+	if len(ips) > 0 {
+		return ips[0]
+	}
+	return fmt.Sprintf("http://127.0.0.1:%d", port)
+}
+
+// StartReceive initiates the local receiver server and optionally Cloudflare tunnel for incoming transfers
 func (a *App) StartReceive() (*ReceiveResult, error) {
-	// 1. Ensure cloudflared is ready (downloads with progress if missing)
-	if _, err := a.EnsureCloudflared(); err != nil {
-		return nil, err
+	cfg := config.Load()
+	networkMode := cfg.NetworkMode
+	if networkMode != config.NetworkModeLANOnly && networkMode != config.NetworkModeBoth {
+		networkMode = config.NetworkModeBoth
+	}
+
+	// 1. Ensure cloudflared is ready only if we need Internet tunnel
+	if networkMode == config.NetworkModeBoth {
+		if _, err := a.EnsureCloudflared(); err != nil {
+			return nil, err
+		}
 	}
 
 	a.mu.Lock()
@@ -551,8 +718,7 @@ func (a *App) StartReceive() (*ReceiveResult, error) {
 	a.isReceiving = false
 	a.tunnelManager.Stop()
 
-	// 1. Check config for custom domain & fixed port
-	cfg := config.Load()
+	// Check config for custom domain & fixed port
 	port := 0
 	if cfg.UseCustomDomain && cfg.FixedPort > 0 {
 		port = cfg.FixedPort
@@ -577,34 +743,63 @@ func (a *App) StartReceive() (*ReceiveResult, error) {
 	}
 	a.receiveServer = rcv
 
-	// 3. Start Cloudflare Tunnel (Named Tunnel or Quick Tunnel)
+	primaryLocal := getPrimaryLocalURL(rcv.Port())
+	localIPs := getLocalIPs(rcv.Port())
+
+	// 3. Start Cloudflare Tunnel if networkMode == "both"
 	var publicURL string
-	if cfg.UseCustomDomain && cfg.TunnelToken != "" && cfg.CustomDomain != "" {
-		publicURL, err = a.tunnelManager.StartWithToken(cfg.TunnelToken, cfg.CustomDomain)
-		if err != nil {
-			rcv.Stop()
-			a.receiveServer = nil
-			return nil, fmt.Errorf("fallo al iniciar túnel con dominio personalizado: %w", err)
-		}
-	} else {
-		publicURL, err = a.tunnelManager.Start(rcv.Port())
-		if err != nil {
-			rcv.Stop()
-			a.receiveServer = nil
-			return nil, fmt.Errorf("fallo al generar túnel de Cloudflare: %w", err)
+	if networkMode == config.NetworkModeBoth {
+		if cfg.UseCustomDomain && cfg.TunnelToken != "" && cfg.CustomDomain != "" {
+			publicURL, err = a.tunnelManager.StartWithToken(cfg.TunnelToken, cfg.CustomDomain)
+			if err != nil {
+				rcv.Stop()
+				a.receiveServer = nil
+				return nil, fmt.Errorf("fallo al iniciar túnel con dominio personalizado: %w", err)
+			}
+		} else {
+			publicURL, err = a.tunnelManager.Start(rcv.Port())
+			if err != nil {
+				rcv.Stop()
+				a.receiveServer = nil
+				return nil, fmt.Errorf("fallo al generar túnel de Cloudflare: %w", err)
+			}
 		}
 	}
 
 	a.isReceiving = true
 
-	localIPs := getLocalIPs(rcv.Port())
+	uploadURL := ""
+	if publicURL != "" {
+		uploadURL = publicURL
+	}
 
 	return &ReceiveResult{
-		PublicURL:   publicURL,
-		UploadURL:   publicURL,
-		LocalURLs:   localIPs,
-		DownloadDir: downloadDir,
+		PublicURL:      publicURL,
+		UploadURL:      uploadURL,
+		LocalUploadURL: primaryLocal,
+		LocalURLs:      localIPs,
+		DownloadDir:    downloadDir,
+		NetworkMode:    networkMode,
 	}, nil
+}
+
+// SetNetworkMode updates the network mode ("both" or "lan_only") in configuration
+func (a *App) SetNetworkMode(mode string) error {
+	if mode != config.NetworkModeBoth && mode != config.NetworkModeLANOnly {
+		return fmt.Errorf("modo de red no válido: %s", mode)
+	}
+	cfg := config.Load()
+	cfg.NetworkMode = mode
+	return config.Save(cfg)
+}
+
+// GetNetworkMode returns the current network mode ("both" or "lan_only")
+func (a *App) GetNetworkMode() string {
+	cfg := config.Load()
+	if cfg.NetworkMode != config.NetworkModeLANOnly && cfg.NetworkMode != config.NetworkModeBoth {
+		return config.NetworkModeBoth
+	}
+	return cfg.NetworkMode
 }
 
 // StopReceive terminates the active receive session

@@ -34,6 +34,10 @@ export function GetDownloadDir() {
   return window['go']['main']['App']['GetDownloadDir']();
 }
 
+export function GetNetworkMode() {
+  return window['go']['main']['App']['GetNetworkMode']();
+}
+
 export function LoadFilesFromPaths(arg1) {
   return window['go']['main']['App']['LoadFilesFromPaths'](arg1);
 }
@@ -68,6 +72,10 @@ export function SelectFiles() {
 
 export function SetDownloadDir(arg1) {
   return window['go']['main']['App']['SetDownloadDir'](arg1);
+}
+
+export function SetNetworkMode(arg1) {
+  return window['go']['main']['App']['SetNetworkMode'](arg1);
 }
 
 export function ShowFileInFolder(arg1) {
