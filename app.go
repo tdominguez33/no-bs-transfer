@@ -204,6 +204,11 @@ func (a *App) DownloadCloudflared() error {
 	return err
 }
 
+// CheckInternetAccess verifies active internet connection
+func (a *App) CheckInternetAccess() bool {
+	return tunnel.CheckInternet()
+}
+
 // SelectFiles opens native Windows file dialog allowing multiple selection
 func (a *App) SelectFiles() ([]*transfer.SharedFile, error) {
 	filePaths, err := wailsRuntime.OpenMultipleFilesDialog(a.ctx, wailsRuntime.OpenDialogOptions{
@@ -286,10 +291,13 @@ func (a *App) StartShare(files []*transfer.SharedFile) (*MultiShareResult, error
 		networkMode = config.NetworkModeBoth
 	}
 
-	// 1. Ensure cloudflared is ready only if we need Internet tunnel
+	// 1. Ensure internet connection & cloudflared are ready only if we need Internet tunnel
 	if networkMode == config.NetworkModeBoth {
+		if !tunnel.CheckInternet() {
+			return nil, fmt.Errorf("No hay conexión a internet, modo no disponible")
+		}
 		if _, err := a.EnsureCloudflared(); err != nil {
-			return nil, err
+			return nil, tunnel.FormatTunnelError(err, false)
 		}
 	}
 
@@ -345,14 +353,14 @@ func (a *App) StartShare(files []*transfer.SharedFile) (*MultiShareResult, error
 			if err != nil {
 				srv.Stop()
 				a.server = nil
-				return nil, fmt.Errorf("fallo al iniciar túnel con dominio personalizado: %w", err)
+				return nil, tunnel.FormatTunnelError(err, true)
 			}
 		} else {
 			publicURL, err = a.tunnelManager.Start(srv.Port())
 			if err != nil {
 				srv.Stop()
 				a.server = nil
-				return nil, fmt.Errorf("fallo al generar túnel de Cloudflare: %w", err)
+				return nil, tunnel.FormatTunnelError(err, false)
 			}
 		}
 	}
@@ -696,10 +704,13 @@ func (a *App) StartReceive() (*ReceiveResult, error) {
 		networkMode = config.NetworkModeBoth
 	}
 
-	// 1. Ensure cloudflared is ready only if we need Internet tunnel
+	// 1. Ensure internet connection & cloudflared are ready only if we need Internet tunnel
 	if networkMode == config.NetworkModeBoth {
+		if !tunnel.CheckInternet() {
+			return nil, fmt.Errorf("No hay conexión a internet, modo no disponible")
+		}
 		if _, err := a.EnsureCloudflared(); err != nil {
-			return nil, err
+			return nil, tunnel.FormatTunnelError(err, false)
 		}
 	}
 
@@ -754,14 +765,14 @@ func (a *App) StartReceive() (*ReceiveResult, error) {
 			if err != nil {
 				rcv.Stop()
 				a.receiveServer = nil
-				return nil, fmt.Errorf("fallo al iniciar túnel con dominio personalizado: %w", err)
+				return nil, tunnel.FormatTunnelError(err, true)
 			}
 		} else {
 			publicURL, err = a.tunnelManager.Start(rcv.Port())
 			if err != nil {
 				rcv.Stop()
 				a.receiveServer = nil
-				return nil, fmt.Errorf("fallo al generar túnel de Cloudflare: %w", err)
+				return nil, tunnel.FormatTunnelError(err, false)
 			}
 		}
 	}

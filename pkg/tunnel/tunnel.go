@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -15,6 +17,163 @@ import (
 
 	"no-bs-transfer/pkg/config"
 )
+
+// CheckInternet verifies if there is active internet connectivity
+// by attempting fast concurrent HTTP probes against standard endpoints
+// (Cloudflare, Google, Microsoft) and fallback DNS resolution.
+// Does NOT use port 53 dials which are falsely answered by offline local routers.
+func CheckInternet() bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 1200*time.Millisecond)
+	defer cancel()
+
+	endpoints := []string{
+		"http://cp.cloudflare.com/generate_204",
+		"http://connectivitycheck.gstatic.com/generate_204",
+		"http://www.msftconnecttest.com/connecttest.txt",
+	}
+
+	tr := &http.Transport{
+		DisableKeepAlives: true,
+		Proxy:             http.ProxyFromEnvironment,
+		DialContext: (&net.Dialer{
+			Timeout: 1000 * time.Millisecond,
+		}).DialContext,
+	}
+	client := &http.Client{
+		Transport: tr,
+		Timeout:   1100 * time.Millisecond,
+	}
+
+	success := make(chan struct{}, 1)
+	done := make(chan struct{})
+	var wg sync.WaitGroup
+
+	for _, ep := range endpoints {
+		wg.Add(1)
+		go func(url string) {
+			defer wg.Done()
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+			if err != nil {
+				return
+			}
+			resp, err := client.Do(req)
+			if err == nil {
+				_ = resp.Body.Close()
+				if resp.StatusCode == 200 || resp.StatusCode == 204 {
+					select {
+					case success <- struct{}{}:
+					default:
+					}
+				}
+			}
+		}(ep)
+	}
+
+	// Fallback: fast DNS lookup of Cloudflare and TCP 443 check
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		ips, err := net.DefaultResolver.LookupIP(ctx, "ip4", "cloudflare.com")
+		if err == nil && len(ips) > 0 {
+			var d net.Dialer
+			d.Timeout = 1000 * time.Millisecond
+			conn, err := d.DialContext(ctx, "tcp", "1.1.1.1:443")
+			if err == nil {
+				_ = conn.Close()
+				select {
+				case success <- struct{}{}:
+				default:
+				}
+			}
+		}
+	}()
+
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-success:
+		return true
+	case <-done:
+		return false
+	case <-ctx.Done():
+		return false
+	}
+}
+
+// FormatTunnelError translates raw cloudflared or networking errors into
+// clean, granular, and user-friendly messages for the interface.
+func FormatTunnelError(err error, isCustomDomain bool) error {
+	if err == nil {
+		return nil
+	}
+
+	errMsg := err.Error()
+	errLower := strings.ToLower(errMsg)
+
+	// 1. Connectivity / DNS / Offline issues
+	if strings.Contains(errLower, "dnsquery") ||
+		strings.Contains(errLower, "argotunnel.com") ||
+		strings.Contains(errLower, "lookup") ||
+		strings.Contains(errLower, "no such host") ||
+		strings.Contains(errLower, "network is unreachable") ||
+		strings.Contains(errLower, "network unreachable") ||
+		strings.Contains(errLower, "connect: connection refused") ||
+		strings.Contains(errLower, "se agotó el tiempo de espera") ||
+		strings.Contains(errLower, "no hay conexión a internet") ||
+		strings.Contains(errLower, "failed to connect to edge") ||
+		strings.Contains(errLower, "could not lookup srv records") ||
+		strings.Contains(errLower, "dial tcp") ||
+		strings.Contains(errLower, "i/o timeout") ||
+		strings.Contains(errLower, "quic: timeout") {
+		return fmt.Errorf("No hay conexión a internet, modo no disponible")
+	}
+
+	// 2. Custom Domain / Token validation issues
+	if isCustomDomain && (strings.Contains(errLower, "token") ||
+		strings.Contains(errLower, "unauthorized") ||
+		strings.Contains(errLower, "credentials") ||
+		strings.Contains(errLower, "auth") ||
+		strings.Contains(errLower, "invalid") ||
+		strings.Contains(errLower, "cannot determine default configuration path")) {
+		return fmt.Errorf("El token de Cloudflare Tunnel no es válido o ha expirado. Verifica el token en Configuración.")
+	}
+
+	// 3. Quick tunnel service busy / rate limited
+	if strings.Contains(errLower, "rate limit") ||
+		strings.Contains(errLower, "trycloudflare.com") ||
+		strings.Contains(errLower, "503") ||
+		strings.Contains(errLower, "quick tunnel") {
+		return fmt.Errorf("Los servidores de túneles públicos de Cloudflare están saturados en este momento. Intenta nuevamente en unos instantes o utiliza Red Local.")
+	}
+
+	// 4. Port collision
+	if strings.Contains(errLower, "address already in use") ||
+		strings.Contains(errLower, "already in use") ||
+		strings.Contains(errLower, "bind") {
+		return fmt.Errorf("El puerto de red ya está en uso por otra aplicación. Modifícalo en Configuración.")
+	}
+
+	// 5. Binary execution / installation issues
+	if strings.Contains(errLower, "cloudflared no encontrado") ||
+		strings.Contains(errLower, "executable file not found") ||
+		strings.Contains(errLower, "permission denied") {
+		return fmt.Errorf("No se encontró el componente Cloudflared. Puedes descargarlo desde Configuración.")
+	}
+
+	// 6. Generic timeout
+	if strings.Contains(errLower, "tiempo de espera agotado") || strings.Contains(errLower, "timeout") {
+		return fmt.Errorf("Se agotó el tiempo de espera al conectar con Cloudflare. Comprueba tu conexión o utiliza Red Local.")
+	}
+
+	// Fallback
+	if isCustomDomain {
+		return fmt.Errorf("No se pudo iniciar el túnel con el dominio personalizado. Verifica tu configuración y conexión a internet.")
+	}
+	return fmt.Errorf("No se pudo iniciar el túnel de Cloudflare. Intenta usar Red Local.")
+}
 
 var tunnelRegex = regexp.MustCompile(`https://[a-zA-Z0-9-]+\.trycloudflare\.com`)
 

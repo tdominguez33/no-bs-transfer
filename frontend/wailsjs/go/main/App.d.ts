@@ -8,6 +8,8 @@ export function AddFilesToShare(arg1:Array<transfer.SharedFile>):Promise<main.Mu
 
 export function CancelCloudflaredDownload():Promise<void>;
 
+export function CheckInternetAccess():Promise<boolean>;
+
 export function CopyToClipboard(arg1:string):Promise<void>;
 
 export function DownloadCloudflared():Promise<void>;

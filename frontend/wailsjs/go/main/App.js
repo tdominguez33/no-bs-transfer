@@ -10,6 +10,10 @@ export function CancelCloudflaredDownload() {
   return window['go']['main']['App']['CancelCloudflaredDownload']();
 }
 
+export function CheckInternetAccess() {
+  return window['go']['main']['App']['CheckInternetAccess']();
+}
+
 export function CopyToClipboard(arg1) {
   return window['go']['main']['App']['CopyToClipboard'](arg1);
 }

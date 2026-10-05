@@ -8,6 +8,7 @@ import (
 	"github.com/wailsapp/wails/v2"
 	"github.com/wailsapp/wails/v2/pkg/options"
 	"github.com/wailsapp/wails/v2/pkg/options/assetserver"
+	"github.com/wailsapp/wails/v2/pkg/options/windows"
 )
 
 //go:embed all:frontend/dist
@@ -35,6 +36,7 @@ func main() {
 		Height:    height,
 		MinWidth:  450,
 		MinHeight: 300,
+		Frameless: true,
 		AssetServer: &assetserver.Options{
 			Assets: assets,
 		},
@@ -48,6 +50,9 @@ func main() {
 		DragAndDrop: &options.DragAndDrop{
 			EnableFileDrop:     true,
 			DisableWebViewDrop: true,
+		},
+		Windows: &windows.Options{
+			DisableFramelessWindowDecorations: false,
 		},
 	})
 

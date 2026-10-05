@@ -1,6 +1,9 @@
 package tunnel
 
-import "testing"
+import (
+	"fmt"
+	"testing"
+)
 
 func TestFormatPublicURL(t *testing.T) {
 	tests := []struct {
@@ -86,6 +89,60 @@ func TestShouldForceHTTP2(t *testing.T) {
 	t.Setenv("NO_BS_HTTP2", "true")
 	if !ShouldForceHTTP2() {
 		t.Error("expected true when NO_BS_HTTP2 is true")
+	}
+}
+
+func TestCheckInternet(t *testing.T) {
+	// Active internet environment should return true quickly
+	ok := CheckInternet()
+	if !ok {
+		t.Log("Note: CheckInternet returned false (machine may be offline or endpoints blocked)")
+	}
+}
+
+func TestFormatTunnelError(t *testing.T) {
+	tests := []struct {
+		err            error
+		isCustomDomain bool
+		expectedMsg    string
+	}{
+		{
+			err:            fmt.Errorf("cloudflared se detuvo: Could not lookup srv records on _v2-origintunneld._tcp.argotunnel.com: lookup argotunnel.com: dnsquery: Se devolvió esta operación porque se agotó el tiempo de espera."),
+			isCustomDomain: true,
+			expectedMsg:    "No hay conexión a internet, modo no disponible",
+		},
+		{
+			err:            fmt.Errorf("dial tcp: lookup trycloudflare.com: no such host"),
+			isCustomDomain: false,
+			expectedMsg:    "No hay conexión a internet, modo no disponible",
+		},
+		{
+			err:            fmt.Errorf("cannot determine default configuration path: unauthorized token credentials"),
+			isCustomDomain: true,
+			expectedMsg:    "El token de Cloudflare Tunnel no es válido o ha expirado. Verifica el token en Configuración.",
+		},
+		{
+			err:            fmt.Errorf("rate limit exceeded on trycloudflare.com: 503 Service Unavailable"),
+			isCustomDomain: false,
+			expectedMsg:    "Los servidores de túneles públicos de Cloudflare están saturados en este momento. Intenta nuevamente en unos instantes o utiliza Red Local.",
+		},
+		{
+			err:            fmt.Errorf("bind: address already in use"),
+			isCustomDomain: false,
+			expectedMsg:    "El puerto de red ya está en uso por otra aplicación. Modifícalo en Configuración.",
+		},
+		{
+			err:            fmt.Errorf("cloudflared no encontrado en el sistema"),
+			isCustomDomain: false,
+			expectedMsg:    "No se encontró el componente Cloudflared. Puedes descargarlo desde Configuración.",
+		},
+	}
+
+	for _, tc := range tests {
+		formatted := FormatTunnelError(tc.err, tc.isCustomDomain)
+		if formatted == nil || formatted.Error() != tc.expectedMsg {
+			t.Errorf("FormatTunnelError(%v, %v) = %v; want %q", tc.err, tc.isCustomDomain, formatted, tc.expectedMsg)
+		}
 	}
 }
 

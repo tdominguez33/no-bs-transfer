@@ -13,6 +13,7 @@
     SaveConfig,
     GetNetworkMode,
     SetNetworkMode,
+    CheckInternetAccess,
     GetCloudflaredStatus,
     DownloadCloudflared,
     CancelCloudflaredDownload,
@@ -25,7 +26,18 @@
     OpenFile,
     ShowFileInFolder
   } from '../wailsjs/go/main/App';
-  import { EventsOn, EventsOff, OnFileDrop, OnFileDropOff } from '../wailsjs/runtime/runtime';
+  import {
+    EventsOn,
+    EventsOff,
+    OnFileDrop,
+    OnFileDropOff,
+    WindowMinimise,
+    WindowToggleMaximise,
+    WindowIsMaximised,
+    WindowSetDarkTheme,
+    WindowSetLightTheme,
+    Quit
+  } from '../wailsjs/runtime/runtime';
   import type { transfer, main, config } from '../wailsjs/go/models';
 
   import {
@@ -57,7 +69,9 @@
     Folder,
     FolderOpen,
     FolderDown,
-    ExternalLink
+    ExternalLink,
+    WifiOff,
+    RefreshCw
   } from '@lucide/svelte';
 
   interface ReceivedFile {
@@ -126,6 +140,12 @@
 
   // App Mode State: 'send' (default) vs 'receive'
   let activeMode = $state<'send' | 'receive'>('send');
+
+  // Connectivity State
+  let isOnline = $state<boolean>(typeof navigator !== 'undefined' ? navigator.onLine : true);
+  let showOfflineTooltip = $state(false);
+  let isCheckingConnection = $state(false);
+  let offlineTooltipTimer: any = null;
 
   // Receive State
   let isReceiving = $state(false);
@@ -254,9 +274,63 @@
   function applyTheme(dark: boolean) {
     if (dark) {
       document.documentElement.classList.add('dark');
+      try {
+        WindowSetDarkTheme();
+      } catch {}
     } else {
       document.documentElement.classList.remove('dark');
+      try {
+        WindowSetLightTheme();
+      } catch {}
     }
+  }
+
+  // Window State and Controls
+  let isMaximised = $state(false);
+
+  function handleMinimise() {
+    try {
+      WindowMinimise();
+    } catch (e) {
+      console.error('Error minimizing window:', e);
+    }
+  }
+
+  async function handleToggleMaximise() {
+    try {
+      await WindowToggleMaximise();
+      setTimeout(async () => {
+        try {
+          isMaximised = await WindowIsMaximised();
+        } catch {}
+      }, 50);
+    } catch (e) {
+      console.error('Error toggling maximize:', e);
+    }
+  }
+
+  function handleHeaderDblClick(e: MouseEvent) {
+    const target = e.target as HTMLElement | null;
+    if (target?.closest('button, input, select, textarea, a, .wails-no-drag')) {
+      return;
+    }
+    handleToggleMaximise();
+  }
+
+  function handleClose() {
+    try {
+      Quit();
+    } catch (e) {
+      console.error('Error closing window:', e);
+    }
+  }
+
+  function handleWindowResize() {
+    try {
+      WindowIsMaximised().then(max => {
+        isMaximised = max;
+      }).catch(() => {});
+    } catch {}
   }
 
   function cleanDomainInput(val: string): string {
@@ -368,6 +442,7 @@
   }
 
   async function handleNetworkModeChange(mode: 'both' | 'lan_only') {
+    if (mode === 'both' && !isOnline) return;
     if (configState.networkMode === mode) return;
     configState.networkMode = mode;
     try {
@@ -382,6 +457,87 @@
     } catch (err: any) {
       console.error('Error al cambiar modo de red:', err);
     }
+  }
+
+  function updateOnlineStatus(online: boolean) {
+    isOnline = online;
+    if (!online) {
+      if (configState.networkMode === 'both') {
+        if (!isSharing && !isReceiving && !isStarting && !isStartingReceive && !isStopping && !isStoppingReceive) {
+          handleNetworkModeChange('lan_only');
+        }
+      }
+    } else {
+      showOfflineTooltip = false;
+    }
+  }
+
+  async function checkConnectivity() {
+    try {
+      const hasNet = await CheckInternetAccess();
+      updateOnlineStatus(hasNet);
+    } catch {
+      updateOnlineStatus(typeof navigator !== 'undefined' ? navigator.onLine : true);
+    }
+  }
+
+  function handleOnlineEvent() {
+    checkConnectivity();
+  }
+
+  function handleOfflineEvent() {
+    updateOnlineStatus(false);
+  }
+
+  function openOfflineTooltip() {
+    if (!isOnline) {
+      if (offlineTooltipTimer) {
+        clearTimeout(offlineTooltipTimer);
+        offlineTooltipTimer = null;
+      }
+      showOfflineTooltip = true;
+    }
+  }
+
+  function scheduleCloseOfflineTooltip() {
+    if (offlineTooltipTimer) clearTimeout(offlineTooltipTimer);
+    offlineTooltipTimer = setTimeout(() => {
+      showOfflineTooltip = false;
+    }, 250);
+  }
+
+  function cancelCloseOfflineTooltip() {
+    if (offlineTooltipTimer) {
+      clearTimeout(offlineTooltipTimer);
+      offlineTooltipTimer = null;
+    }
+  }
+
+  async function handleRetryConnection() {
+    if (isCheckingConnection) return;
+    isCheckingConnection = true;
+    const startTime = Date.now();
+    const minDurationMs = 600; // Duración mínima visual para que la carga se aprecie suave sin flicker
+
+    let hasNet = false;
+    try {
+      hasNet = await CheckInternetAccess();
+    } catch {
+      hasNet = false;
+    }
+
+    const elapsed = Date.now() - startTime;
+    if (elapsed < minDurationMs) {
+      await new Promise(r => setTimeout(r, minDurationMs - elapsed));
+    }
+
+    updateOnlineStatus(hasNet);
+    if (hasNet) {
+      showOfflineTooltip = false;
+      errorMessage = '';
+      await handleNetworkModeChange('both');
+    }
+    isCheckingConnection = false;
   }
 
   let autoSaveTimer: any = null;
@@ -459,12 +615,24 @@
     // Load initial config
     loadConfig();
 
+    // Initialize maximized state and listen for window resizing
+    try {
+      WindowIsMaximised().then(max => {
+        isMaximised = max;
+      }).catch(() => {});
+    } catch {}
+    window.addEventListener('resize', handleWindowResize);
+
     // Prevent default browser drag & drop with move dropEffect during reordering
     window.addEventListener('dragover', handleGlobalDragOver);
     window.addEventListener('dragenter', handleGlobalDragOver);
     window.addEventListener('drop', handleGlobalDrop);
 
-    // Native file drop
+    // Network online/offline event detection
+    window.addEventListener('online', handleOnlineEvent);
+    window.addEventListener('offline', handleOfflineEvent);
+    checkConnectivity();
+
     OnFileDrop(async (x: number, y: number, paths: string[]) => {
       isDragging = false;
       if (paths && paths.length > 0) {
@@ -564,8 +732,12 @@
     window.removeEventListener('dragover', handleGlobalDragOver);
     window.removeEventListener('dragenter', handleGlobalDragOver);
     window.removeEventListener('drop', handleGlobalDrop);
+    window.removeEventListener('resize', handleWindowResize);
+    window.removeEventListener('online', handleOnlineEvent);
+    window.removeEventListener('offline', handleOfflineEvent);
     Object.values(itemWarningTimers).forEach(t => clearTimeout(t));
     itemWarningTimers = {};
+    if (offlineTooltipTimer) clearTimeout(offlineTooltipTimer);
   });
 
   function addFiles(newFiles: transfer.SharedFile[]) {
@@ -746,6 +918,27 @@
       }
     }
 
+    // Pre-flight check: si está en modo internet, verificar conexión activa antes de arrancar
+    if (configState.networkMode === 'both') {
+      isStarting = true;
+      try {
+        const hasInternet = await CheckInternetAccess();
+        if (!hasInternet) {
+          isStarting = false;
+          updateOnlineStatus(false);
+          await handleNetworkModeChange('lan_only');
+          errorMessage = 'No hay conexión a internet, modo no disponible';
+          return;
+        }
+      } catch {
+        isStarting = false;
+        updateOnlineStatus(false);
+        await handleNetworkModeChange('lan_only');
+        errorMessage = 'No hay conexión a internet, modo no disponible';
+        return;
+      }
+    }
+
     isStarting = true;
 
     try {
@@ -755,7 +948,16 @@
       shareLinkTarget = result.networkMode === 'lan_only' ? 'local' : 'internet';
       isIndividualLinksExpanded = false;
     } catch (err: any) {
-      errorMessage = err?.message || 'Error al iniciar la transferencia';
+      const msg = err?.message || 'Error al iniciar la transferencia';
+      errorMessage = msg;
+      if (
+        msg.includes('No hay conexión a internet') ||
+        msg.includes('modo no disponible') ||
+        msg.includes('no disponible')
+      ) {
+        updateOnlineStatus(false);
+        await handleNetworkModeChange('lan_only');
+      }
       isSharing = false;
     } finally {
       isStarting = false;
@@ -822,6 +1024,27 @@
       }
     }
 
+    // Pre-flight check: si está en modo internet, verificar conexión activa antes de arrancar
+    if (configState.networkMode === 'both') {
+      isStartingReceive = true;
+      try {
+        const hasInternet = await CheckInternetAccess();
+        if (!hasInternet) {
+          isStartingReceive = false;
+          updateOnlineStatus(false);
+          await handleNetworkModeChange('lan_only');
+          errorMessage = 'No hay conexión a internet, modo no disponible';
+          return;
+        }
+      } catch {
+        isStartingReceive = false;
+        updateOnlineStatus(false);
+        await handleNetworkModeChange('lan_only');
+        errorMessage = 'No hay conexión a internet, modo no disponible';
+        return;
+      }
+    }
+
     isStartingReceive = true;
     try {
       const res = await StartReceive();
@@ -832,7 +1055,16 @@
         await generateReceiveQR(getActiveReceiveUrl());
       }
     } catch (err: any) {
-      errorMessage = err?.message || 'Error al iniciar el receptor de archivos';
+      const msg = err?.message || 'Error al iniciar el receptor de archivos';
+      errorMessage = msg;
+      if (
+        msg.includes('No hay conexión a internet') ||
+        msg.includes('modo no disponible') ||
+        msg.includes('no disponible')
+      ) {
+        updateOnlineStatus(false);
+        await handleNetworkModeChange('lan_only');
+      }
       isReceiving = false;
     } finally {
       isStartingReceive = false;
@@ -1093,82 +1325,222 @@
 
 <div class={isDark ? 'dark' : ''}>
   <div class="h-screen w-screen bg-zinc-50 dark:bg-zinc-950 text-zinc-900 dark:text-zinc-100 flex flex-col font-sans select-none antialiased overflow-hidden">
-    <!-- Header -->
-    <header class="shrink-0 border-b border-zinc-200 dark:border-zinc-800/80 px-4 py-2 flex items-center justify-between">
-      <div class="flex items-center gap-2.5">
-        <h1 class="font-semibold text-sm tracking-tight text-zinc-900 dark:text-zinc-100">
+    <!-- Unified Header & Window Title Bar -->
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <header
+      class="shrink-0 h-10 border-b border-zinc-200 dark:border-zinc-800/80 bg-zinc-50/95 dark:bg-zinc-950/95 backdrop-blur-md pl-3.5 pr-0 flex items-center justify-between select-none relative z-50 wails-drag"
+      ondblclick={handleHeaderDblClick}
+    >
+      <!-- Left: App Title -->
+      <div class="flex items-center min-w-0 pointer-events-none">
+        <h1 class="font-semibold text-sm tracking-tight text-zinc-900 dark:text-zinc-100 truncate">
           no-bs-transfer
         </h1>
-        <span class="text-xs px-2 py-0.5 rounded-md font-mono {isReceiving || isSharing ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20' : 'bg-zinc-100 dark:bg-zinc-900 text-zinc-500 dark:text-zinc-400 border border-zinc-200 dark:border-zinc-800'}">
-          {#if isReceiving || isSharing}
-            {configState.networkMode === 'lan_only' ? 'red local activa' : 'túnel activo'}
-          {:else}
-            {configState.networkMode === 'lan_only' ? 'red local inactiva' : 'túnel inactivo'}
-          {/if}
-        </span>
       </div>
 
-      <!-- Action buttons: Network Mode Toggle, Settings & Theme Toggle -->
-      <div class="flex items-center gap-1.5">
-        <!-- Network Mode Toggle in Top-Right Corner -->
-        <div class="inline-flex p-0.5 bg-zinc-200/70 dark:bg-zinc-800/70 rounded-lg border border-zinc-200 dark:border-zinc-700/60 shadow-2xs text-xs">
+      <!-- Center: Draggable Spacer -->
+      <div class="flex-1 h-full min-w-3 wails-drag"></div>
+
+      <!-- Right: Action buttons & Native Window Controls -->
+      <div class="flex items-center h-full wails-no-drag">
+        <!-- Action buttons: Network Mode Toggle, Settings & Theme Toggle -->
+        <div class="flex items-center gap-1.5 mr-2">
+          <!-- Network Mode Toggle in Top-Right Corner -->
+          <div class="relative grid grid-cols-2 p-0.5 bg-zinc-200/70 dark:bg-zinc-800/70 rounded-lg border border-zinc-200 dark:border-zinc-700/60 shadow-2xs text-xs select-none">
+            <!-- Animated sliding pill indicator -->
+            <div
+              class="segmented-pill absolute top-0.5 bottom-0.5 rounded-md bg-white dark:bg-zinc-900 shadow-xs pointer-events-none"
+              style="left: 2px; width: calc(50% - 2px); transform: translate3d({configState.networkMode === 'lan_only' ? '0%' : '100%'}, 0, 0);"
+            ></div>
+
+            <!-- Option 1: Red local -->
+            <button
+              type="button"
+              onclick={() => handleNetworkModeChange('lan_only')}
+              disabled={isSharing || isReceiving || isStarting || isStartingReceive || isStopping || isStoppingReceive}
+              aria-label="Red local"
+              class="relative z-10 px-2.5 py-1 rounded-md flex items-center justify-center gap-1.5 font-medium transition-colors duration-200 cursor-pointer disabled:opacity-50 disabled:cursor-default {configState.networkMode === 'lan_only' ? 'text-emerald-600 dark:text-emerald-400 font-semibold' : 'text-zinc-500 enabled:hover:text-zinc-800 dark:enabled:hover:text-zinc-200'}"
+            >
+              <EthernetPort class="w-3.5 h-3.5 shrink-0" />
+              <span class="hidden min-[580px]:inline">Red local</span>
+            </button>
+
+            <!-- Option 2: Internet -->
+            <!-- svelte-ignore a11y_no_static_element_interactions -->
+            <div
+              class="relative z-10 flex"
+              onmouseenter={openOfflineTooltip}
+              onmouseleave={scheduleCloseOfflineTooltip}
+            >
+              <button
+                type="button"
+                onclick={() => handleNetworkModeChange('both')}
+                disabled={isSharing || isReceiving || isStarting || isStartingReceive || isStopping || isStoppingReceive || !isOnline}
+                aria-label="Internet"
+                class="w-full px-2.5 py-1 rounded-md flex items-center justify-center gap-1.5 font-medium transition-colors duration-200 {configState.networkMode === 'both' ? 'text-indigo-600 dark:text-indigo-400 font-semibold' : 'text-zinc-500 enabled:hover:text-zinc-800 dark:enabled:hover:text-zinc-200'} {!isOnline ? 'opacity-40 cursor-default' : 'cursor-pointer disabled:opacity-50 disabled:cursor-default'}"
+              >
+                <Globe class="w-3.5 h-3.5 shrink-0" />
+                <span class="hidden min-[580px]:inline">Internet</span>
+              </button>
+            </div>
+
+            <!-- Custom App-Themed Offline Tooltip (centrado en el toggle con flecha apuntando a Internet) -->
+            {#if !isOnline && showOfflineTooltip}
+              <!-- svelte-ignore a11y_no_static_element_interactions -->
+              <div
+                role="tooltip"
+                onmouseenter={cancelCloseOfflineTooltip}
+                onmouseleave={scheduleCloseOfflineTooltip}
+                class="absolute top-full left-1/2 -translate-x-1/2 mt-2 z-50 w-64 p-3 rounded-xl bg-white dark:bg-zinc-900 text-zinc-900 dark:text-zinc-100 border border-zinc-200 dark:border-zinc-800 shadow-xl text-xs transition-all duration-150 flex flex-col gap-2.5 animate-in fade-in zoom-in-95 pointer-events-auto"
+              >
+                <!-- Tooltip arrow indicator pointing to Internet option on the right -->
+                <div class="absolute -top-1 left-[65%] -translate-x-1/2 w-2 h-2 rotate-45 bg-white dark:bg-zinc-900 border-t border-l border-zinc-200 dark:border-zinc-800"></div>
+
+                <div class="flex items-start gap-2.5 relative z-10">
+                  <div class="p-1 rounded-md bg-amber-500/10 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5">
+                    <WifiOff class="w-3.5 h-3.5" />
+                  </div>
+                  <div class="flex flex-col gap-0.5 min-w-0">
+                    <span class="font-semibold text-xs text-zinc-900 dark:text-zinc-100">Sin conexión a internet</span>
+                    <span class="text-[11px] text-zinc-500 dark:text-zinc-400 leading-normal">
+                      El túnel de Cloudflare no está disponible. Usa <strong>Red local</strong> para transferir en tu Wi-Fi.
+                    </span>
+                  </div>
+                </div>
+
+                <!-- Footer Action: Solo el botón de reintentar -->
+                <div class="pt-2 border-t border-zinc-100 dark:border-zinc-800/80 flex items-center justify-end relative z-10">
+                  <button
+                    type="button"
+                    onclick={handleRetryConnection}
+                    disabled={isCheckingConnection}
+                    class="px-2.5 py-1 rounded-lg text-[11px] font-medium transition-all duration-150 flex items-center gap-1.5 cursor-pointer disabled:cursor-pointer shadow-2xs shrink-0 select-none {isCheckingConnection ? 'bg-zinc-200 dark:bg-zinc-800 text-zinc-400 dark:text-zinc-500 opacity-70' : 'bg-zinc-900 hover:bg-zinc-800 dark:bg-zinc-100 dark:hover:bg-zinc-200 text-white dark:text-zinc-900'}"
+                  >
+                    <RefreshCw class="w-3 h-3 shrink-0 {isCheckingConnection ? 'animate-spin' : ''}" />
+                    <span>Reintentar</span>
+                  </button>
+                </div>
+              </div>
+            {/if}
+          </div>
+
+          <div class="h-4 w-px bg-zinc-200 dark:bg-zinc-800 mx-0.5"></div>
+
+          <!-- Settings Button -->
           <button
-            type="button"
-            onclick={() => handleNetworkModeChange('lan_only')}
-            disabled={isSharing || isReceiving || isStarting || isStartingReceive || isStopping || isStoppingReceive}
-            class="px-2 py-1 rounded-md flex items-center gap-1.5 font-medium transition-all duration-150 cursor-pointer disabled:opacity-50 disabled:cursor-default {configState.networkMode === 'lan_only' ? 'bg-white dark:bg-zinc-900 text-emerald-600 dark:text-emerald-400 shadow-xs' : 'text-zinc-500 enabled:hover:text-zinc-800 dark:enabled:hover:text-zinc-200'}"
+            onclick={() => showConfig = !showConfig}
+            class="p-1.5 rounded-lg hover:bg-zinc-200 dark:hover:bg-zinc-800 cursor-pointer {showConfig ? 'bg-zinc-200 dark:bg-zinc-800 text-zinc-900 dark:text-zinc-100' : 'text-zinc-600 dark:text-zinc-400'}"
+            title="Configuración"
+            aria-label="Configuración"
           >
-            <EthernetPort class="w-3.5 h-3.5" />
-            <span class="hidden sm:inline">Red local</span>
+            <Settings class="w-4 h-4" />
           </button>
+
+          <!-- Theme Toggle -->
           <button
-            type="button"
-            onclick={() => handleNetworkModeChange('both')}
-            disabled={isSharing || isReceiving || isStarting || isStartingReceive || isStopping || isStoppingReceive}
-            class="px-2 py-1 rounded-md flex items-center gap-1.5 font-medium transition-all duration-150 cursor-pointer disabled:opacity-50 disabled:cursor-default {configState.networkMode === 'both' ? 'bg-white dark:bg-zinc-900 text-indigo-600 dark:text-indigo-400 shadow-xs' : 'text-zinc-500 enabled:hover:text-zinc-800 dark:enabled:hover:text-zinc-200'}"
+            onclick={toggleTheme}
+            class="p-1.5 rounded-lg hover:bg-zinc-200 dark:hover:bg-zinc-800 text-zinc-600 dark:text-zinc-400 cursor-pointer"
+            title="Cambiar tema (Claro / Oscuro)"
+            aria-label="Cambiar tema"
           >
-            <Globe class="w-3.5 h-3.5" />
-            <span class="hidden sm:inline">Internet</span>
+            {#if isDark}
+              <Sun class="w-4 h-4" />
+            {:else}
+              <Moon class="w-4 h-4" />
+            {/if}
           </button>
         </div>
 
-        <div class="h-4 w-px bg-zinc-200 dark:bg-zinc-800 mx-0.5"></div>
+        <!-- Window Controls Separator -->
+        <div class="h-4 w-px bg-zinc-200 dark:bg-zinc-800 mr-0.5"></div>
 
-        <!-- Settings Button -->
-        <button
-          onclick={() => showConfig = !showConfig}
-          class="p-1.5 rounded-lg hover:bg-zinc-200 dark:hover:bg-zinc-800 cursor-pointer {showConfig ? 'bg-zinc-200 dark:bg-zinc-800 text-zinc-900 dark:text-zinc-100' : 'text-zinc-600 dark:text-zinc-400'}"
-          title="Configuración"
-          aria-label="Configuración"
-        >
-          <Settings class="w-4 h-4" />
-        </button>
+        <!-- Windows Native 3 Window Actions -->
+        <div class="flex items-center h-full">
+          <!-- Minimizar -->
+          <button
+            type="button"
+            onclick={handleMinimise}
+            class="h-full w-11 flex items-center justify-center text-zinc-500 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100 hover:bg-zinc-200/80 dark:hover:bg-zinc-800 active:bg-zinc-300 dark:active:bg-zinc-700 transition-colors cursor-pointer"
+            title="Minimizar"
+            aria-label="Minimizar ventana"
+          >
+            <svg class="w-3.5 h-3.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2">
+              <line x1="3" y1="8" x2="13" y2="8" />
+            </svg>
+          </button>
 
-        <!-- Theme Toggle -->
-        <button
-          onclick={toggleTheme}
-          class="p-1.5 rounded-lg hover:bg-zinc-200 dark:hover:bg-zinc-800 text-zinc-600 dark:text-zinc-400 cursor-pointer"
-          title="Cambiar tema (Claro / Oscuro)"
-          aria-label="Cambiar tema"
-        >
-          {#if isDark}
-            <Sun class="w-4 h-4" />
-          {:else}
-            <Moon class="w-4 h-4" />
-          {/if}
-        </button>
+          <!-- Maximizar / Restaurar -->
+          <button
+            type="button"
+            onclick={handleToggleMaximise}
+            class="h-full w-11 flex items-center justify-center text-zinc-500 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100 hover:bg-zinc-200/80 dark:hover:bg-zinc-800 active:bg-zinc-300 dark:active:bg-zinc-700 transition-colors cursor-pointer"
+            title={isMaximised ? "Restaurar" : "Maximizar"}
+            aria-label={isMaximised ? "Restaurar ventana" : "Maximizar ventana"}
+          >
+            {#if isMaximised}
+              <!-- Restore Icon -->
+              <svg class="w-3.5 h-3.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2">
+                <path d="M5 5V3a.5.5 0 0 1 .5-.5h7a.5.5 0 0 1 .5.5v7a.5.5 0 0 1-.5.5H11" />
+                <rect x="3" y="5" width="8" height="8" rx="0.5" />
+              </svg>
+            {:else}
+              <!-- Maximize Icon -->
+              <svg class="w-3.5 h-3.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2">
+                <rect x="3" y="3" width="10" height="10" rx="0.5" />
+              </svg>
+            {/if}
+          </button>
+
+          <!-- Cerrar -->
+          <button
+            type="button"
+            onclick={handleClose}
+            class="h-full w-11 flex items-center justify-center text-zinc-500 hover:text-white dark:text-zinc-400 dark:hover:text-white hover:bg-red-600 active:bg-red-700 transition-colors cursor-pointer"
+            title="Cerrar"
+            aria-label="Cerrar ventana"
+          >
+            <svg class="w-3.5 h-3.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round">
+              <line x1="3.5" y1="3.5" x2="12.5" y2="12.5" />
+              <line x1="12.5" y1="3.5" x2="3.5" y2="12.5" />
+            </svg>
+          </button>
+        </div>
       </div>
     </header>
 
-    <!-- Mode Selector: Inmediatamente debajo de la barra superior -->
+    <!-- Sub-header: Tunnel/Network Status (esquina superior izquierda) & Mode Selector (centro) -->
     {#if !showConfig}
-      <div class="shrink-0 flex items-center justify-center pt-2.5 pb-1">
-        <div class="inline-flex p-1 bg-zinc-200/80 dark:bg-zinc-800/80 rounded-xl border border-zinc-200/80 dark:border-zinc-700/60 shadow-xs">
+      <div class="shrink-0 relative flex items-center justify-center pt-2.5 pb-1 px-4 min-h-[44px]">
+        <!-- Esquina superior izquierda: Status del túnel / red local -->
+        <div class="absolute left-4 top-1/2 -translate-y-1/2 flex items-center">
+          <span
+            class="inline-flex items-center gap-1.5 text-xs px-2 py-0.5 rounded-md font-mono font-medium tracking-tight transition-colors duration-150 {isReceiving || isSharing ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20' : 'bg-zinc-200/60 dark:bg-zinc-900 text-zinc-500 dark:text-zinc-400 border border-zinc-300/60 dark:border-zinc-800'}"
+            title={isReceiving || isSharing ? (configState.networkMode === 'lan_only' ? 'Red local activa' : 'Túnel activo') : (configState.networkMode === 'lan_only' ? 'Red local inactiva' : 'Túnel inactivo')}
+          >
+            <span class="w-1.5 h-1.5 rounded-full shrink-0 {isReceiving || isSharing ? 'bg-emerald-500 animate-pulse' : 'bg-zinc-400 dark:bg-zinc-600'}"></span>
+            {#if isReceiving || isSharing}
+              <span class="hidden min-[480px]:inline">{configState.networkMode === 'lan_only' ? 'red local activa' : 'túnel activo'}</span>
+              <span class="min-[480px]:hidden">{configState.networkMode === 'lan_only' ? 'red local' : 'túnel'}</span>
+            {:else}
+              <span class="hidden min-[480px]:inline">{configState.networkMode === 'lan_only' ? 'red local inactiva' : 'túnel inactivo'}</span>
+              <span class="min-[480px]:hidden">{configState.networkMode === 'lan_only' ? 'red local' : 'túnel'}</span>
+            {/if}
+          </span>
+        </div>
+
+        <!-- Centro: Selector de modo Enviar / Recibir -->
+        <div class="relative grid grid-cols-2 p-1 bg-zinc-200/80 dark:bg-zinc-800/80 rounded-xl border border-zinc-200/80 dark:border-zinc-700/60 shadow-xs select-none">
+          <!-- Animated sliding pill indicator -->
+          <div
+            class="segmented-pill absolute top-1 bottom-1 rounded-lg bg-white dark:bg-zinc-900 shadow-sm pointer-events-none"
+            style="left: 4px; width: calc(50% - 4px); transform: translate3d({activeMode === 'send' ? '0%' : '100%'}, 0, 0);"
+          ></div>
+
           <button
             type="button"
             onclick={() => switchMode('send')}
             disabled={isStarting || isStartingReceive || isStopping || isStoppingReceive}
-            class="px-4 py-1.5 rounded-lg text-xs font-semibold transition-all duration-150 flex items-center gap-1.5 cursor-pointer disabled:cursor-pointer {activeMode === 'send' ? 'bg-white dark:bg-zinc-900 text-zinc-900 dark:text-zinc-100 shadow-sm' : 'text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200'}"
+            class="relative z-10 px-4 py-1.5 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 cursor-pointer disabled:cursor-pointer transition-colors duration-200 {activeMode === 'send' ? 'text-zinc-900 dark:text-zinc-100' : 'text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200'}"
           >
             <Upload class="w-3.5 h-3.5" />
             <span>Enviar</span>
@@ -1177,7 +1549,7 @@
             type="button"
             onclick={() => switchMode('receive')}
             disabled={isStarting || isStartingReceive || isStopping || isStoppingReceive}
-            class="px-4 py-1.5 rounded-lg text-xs font-semibold transition-all duration-150 flex items-center gap-1.5 cursor-pointer disabled:cursor-pointer {activeMode === 'receive' ? 'bg-white dark:bg-zinc-900 text-zinc-900 dark:text-zinc-100 shadow-sm' : 'text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200'}"
+            class="relative z-10 px-4 py-1.5 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 cursor-pointer disabled:cursor-pointer transition-colors duration-200 {activeMode === 'receive' ? 'text-zinc-900 dark:text-zinc-100' : 'text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200'}"
           >
             <Download class="w-3.5 h-3.5" />
             <span>Recibir</span>
@@ -1186,23 +1558,31 @@
       </div>
     {/if}
 
-    <!-- Error Alert -->
-    {#if errorMessage}
-      <div class="shrink-0 mx-6 mt-4 p-3 rounded-lg bg-red-50 dark:bg-red-950/40 border border-red-200 dark:border-red-900/50 flex items-center justify-between text-xs text-red-700 dark:text-red-400">
-        <div class="flex items-center gap-2">
-          <AlertCircle class="w-4 h-4 shrink-0" />
-          <span>{errorMessage}</span>
+    <!-- Content Area Container with zero-layout-shift floating overlay -->
+    <div class="relative flex-1 w-full min-h-0 flex flex-col overflow-hidden">
+      <!-- Error Alert (floating overlay, zero layout shift) -->
+      {#if errorMessage}
+        <div class="absolute top-2.5 inset-x-4 sm:inset-x-6 z-40 max-w-2xl mx-auto pointer-events-auto">
+          <div class="px-3.5 py-2.5 rounded-xl bg-red-50/95 dark:bg-red-950/90 backdrop-blur-md border border-red-200/90 dark:border-red-900/70 flex items-center justify-between gap-3 text-xs text-red-700 dark:text-red-400 shadow-lg animate-in fade-in slide-in-from-top-2 duration-200">
+            <div class="flex items-center gap-2.5 min-w-0">
+              <AlertCircle class="w-4 h-4 shrink-0 text-red-500 dark:text-red-400" />
+              <span class="leading-snug font-medium break-words">{errorMessage}</span>
+            </div>
+            <button
+              type="button"
+              onclick={() => errorMessage = ''}
+              class="shrink-0 text-[11px] font-semibold text-red-700 hover:text-red-900 dark:text-red-300 dark:hover:text-red-100 hover:underline cursor-pointer px-1 py-0.5"
+            >
+              Descartar
+            </button>
+          </div>
         </div>
-        <button onclick={() => errorMessage = ''} class="font-medium hover:underline cursor-pointer">
-          Descartar
-        </button>
-      </div>
-    {/if}
+      {/if}
 
-    <!-- Main Container -->
-    <main
-      class="flex-1 px-4 py-2 max-w-4xl mx-auto w-full flex flex-col justify-center min-h-0 overflow-hidden"
-    >
+      <!-- Main Container -->
+      <main
+        class="flex-1 px-4 py-2 max-w-4xl mx-auto w-full flex flex-col justify-center min-h-0 overflow-hidden"
+      >
       {#if showConfig}
         <!-- Configuration View -->
         <div class="flex-1 max-w-2xl mx-auto w-full flex flex-col min-h-0 overflow-hidden">
@@ -1430,7 +1810,7 @@
                         performSave();
                       }}
                       placeholder="transfer.midominio.com"
-                      class="bg-zinc-50 dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 rounded-lg px-3 py-2 text-xs font-mono text-zinc-800 dark:text-zinc-200 focus:outline-none focus:border-zinc-400 dark:focus:border-zinc-600 disabled:cursor-not-allowed transition-colors"
+                      class="bg-zinc-50 dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 rounded-lg px-3 py-2 text-xs font-mono text-zinc-800 dark:text-zinc-200 focus:outline-none focus:border-zinc-400 dark:focus:border-zinc-600 disabled:cursor-default transition-colors"
                     />
                     <span class="text-[11px] text-zinc-500">
                       El dominio o subdominio asignado en Cloudflare Zero Trust (ej: <code class="font-mono">transfer.midominio.com</code>).
@@ -1451,13 +1831,13 @@
                         oninput={() => triggerAutoSave(500)}
                         onblur={() => performSave()}
                         placeholder="eyJhIjoi..."
-                        class="w-full bg-zinc-50 dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 rounded-lg pl-3 pr-10 py-2 text-xs font-mono text-zinc-800 dark:text-zinc-200 focus:outline-none focus:border-zinc-400 dark:focus:border-zinc-600 disabled:cursor-not-allowed transition-colors"
+                        class="w-full bg-zinc-50 dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 rounded-lg pl-3 pr-10 py-2 text-xs font-mono text-zinc-800 dark:text-zinc-200 focus:outline-none focus:border-zinc-400 dark:focus:border-zinc-600 disabled:cursor-default transition-colors"
                       />
                       <button
                         type="button"
                         disabled={!configState.useCustomDomain}
                         onclick={() => showToken = !showToken}
-                        class="absolute right-2.5 p-1 text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-300 cursor-pointer disabled:cursor-not-allowed"
+                        class="absolute right-2.5 p-1 text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-300 cursor-pointer disabled:cursor-default"
                         title={showToken ? 'Ocultar token' : 'Mostrar token'}
                         aria-label={showToken ? 'Ocultar token' : 'Mostrar token'}
                       >
@@ -1491,7 +1871,7 @@
                           validatePort();
                           performSave();
                         }}
-                        class="w-full bg-zinc-50 dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 rounded-lg pl-3 pr-7 py-2 text-xs font-mono text-zinc-800 dark:text-zinc-200 focus:outline-none focus:border-zinc-400 dark:focus:border-zinc-600 disabled:cursor-not-allowed transition-colors [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
+                        class="w-full bg-zinc-50 dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 rounded-lg pl-3 pr-7 py-2 text-xs font-mono text-zinc-800 dark:text-zinc-200 focus:outline-none focus:border-zinc-400 dark:focus:border-zinc-600 disabled:cursor-default transition-colors [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
                       />
                       <div class="absolute right-1 inset-y-1 w-5 flex flex-col justify-center border-l border-zinc-200 dark:border-zinc-800 overflow-hidden">
                         <button
@@ -1503,7 +1883,7 @@
                           onmouseleave={stopPortStep}
                           ontouchstart={() => startPortStep(1)}
                           ontouchend={stopPortStep}
-                          class="flex-1 flex items-center justify-center text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200 hover:bg-zinc-200/60 dark:hover:bg-zinc-800/60 transition-colors cursor-pointer select-none disabled:cursor-not-allowed"
+                          class="flex-1 flex items-center justify-center text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200 hover:bg-zinc-200/60 dark:hover:bg-zinc-800/60 transition-colors cursor-pointer select-none disabled:cursor-default"
                           title="Aumentar puerto"
                           aria-label="Aumentar puerto"
                         >
@@ -1518,7 +1898,7 @@
                           onmouseleave={stopPortStep}
                           ontouchstart={() => startPortStep(-1)}
                           ontouchend={stopPortStep}
-                          class="flex-1 flex items-center justify-center text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200 hover:bg-zinc-200/60 dark:hover:bg-zinc-800/60 transition-colors cursor-pointer select-none border-t border-zinc-100 dark:border-zinc-800/60 disabled:cursor-not-allowed"
+                          class="flex-1 flex items-center justify-center text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200 hover:bg-zinc-200/60 dark:hover:bg-zinc-800/60 transition-colors cursor-pointer select-none border-t border-zinc-100 dark:border-zinc-800/60 disabled:cursor-default"
                           title="Disminuir puerto"
                           aria-label="Disminuir puerto"
                         >
@@ -2312,6 +2692,7 @@
         </div>
       {/if}
     </main>
+  </div>
 
     <!-- QR Code Modal Dialog -->
     {#if qrModal.show}
