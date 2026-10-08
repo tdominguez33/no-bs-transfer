@@ -266,22 +266,36 @@
   });
 
   // Toggle Theme
+  let themeTransitionTimer: any = null;
+
   function toggleTheme() {
     isDark = !isDark;
-    applyTheme(isDark);
+    applyTheme(isDark, true);
     try {
       localStorage.setItem('nbs_theme', isDark ? 'dark' : 'light');
     } catch {}
   }
 
-  function applyTheme(dark: boolean) {
+  function applyTheme(dark: boolean, transition = false) {
+    if (typeof document === 'undefined') return;
+    const root = document.documentElement;
+
+    if (transition) {
+      root.classList.add('theme-transitioning');
+      if (themeTransitionTimer) clearTimeout(themeTransitionTimer);
+      themeTransitionTimer = setTimeout(() => {
+        root.classList.remove('theme-transitioning');
+        themeTransitionTimer = null;
+      }, 250);
+    }
+
     if (dark) {
-      document.documentElement.classList.add('dark');
+      root.classList.add('dark');
       try {
         WindowSetDarkTheme();
       } catch {}
     } else {
-      document.documentElement.classList.remove('dark');
+      root.classList.remove('dark');
       try {
         WindowSetLightTheme();
       } catch {}
@@ -1360,11 +1374,11 @@
 </script>
 
 <div class={isDark ? 'dark' : ''}>
-  <div class="h-screen w-screen bg-zinc-50 dark:bg-zinc-950 text-zinc-900 dark:text-zinc-100 flex flex-col font-sans select-none antialiased overflow-hidden">
+  <div class="h-screen w-screen bg-zinc-50 dark:bg-zinc-950 text-zinc-900 dark:text-zinc-100 flex flex-col font-sans select-none antialiased overflow-hidden transition-colors duration-200">
     <!-- Unified Header & Window Title Bar -->
     <!-- svelte-ignore a11y_no_static_element_interactions -->
     <header
-      class="shrink-0 h-10 border-b border-zinc-200 dark:border-zinc-800/80 bg-zinc-50/95 dark:bg-zinc-950/95 backdrop-blur-md pl-3.5 pr-0 flex items-center justify-between select-none relative z-50 wails-drag"
+      class="shrink-0 h-10 border-b border-zinc-200 dark:border-zinc-800/80 bg-zinc-50/95 dark:bg-zinc-950/95 backdrop-blur-md pl-3.5 pr-0 flex items-center justify-between select-none relative z-50 wails-drag transition-colors duration-200"
       ondblclick={handleHeaderDblClick}
     >
       <!-- Left: App Title -->
@@ -1450,7 +1464,7 @@
                     type="button"
                     onclick={handleRetryConnection}
                     disabled={isCheckingConnection}
-                    class="px-2.5 py-1 rounded-lg text-[11px] font-medium transition-all duration-150 flex items-center gap-1.5 cursor-pointer disabled:cursor-pointer shadow-2xs shrink-0 select-none {isCheckingConnection ? 'bg-zinc-200 dark:bg-zinc-800 text-zinc-400 dark:text-zinc-500 opacity-70' : 'bg-zinc-900 hover:bg-zinc-800 dark:bg-zinc-100 dark:hover:bg-zinc-200 text-white dark:text-zinc-900'}"
+                    class="px-2.5 py-1 rounded-lg text-[11px] font-medium transition-colors duration-200 flex items-center gap-1.5 cursor-pointer disabled:cursor-pointer shadow-2xs shrink-0 select-none {isCheckingConnection ? 'bg-zinc-200 dark:bg-zinc-800 text-zinc-400 dark:text-zinc-500 opacity-70' : 'bg-zinc-900 hover:bg-zinc-800 dark:bg-zinc-100 dark:hover:bg-zinc-200 text-white dark:text-zinc-900'}"
                   >
                     <RefreshCw class="w-3 h-3 shrink-0 {isCheckingConnection ? 'animate-spin' : ''}" />
                     <span>{t('header.offline.retry')}</span>
@@ -1465,7 +1479,7 @@
           <!-- Settings Button -->
           <button
             onclick={() => showConfig = !showConfig}
-            class="p-1.5 rounded-lg hover:bg-zinc-200 dark:hover:bg-zinc-800 cursor-pointer {showConfig ? 'bg-zinc-200 dark:bg-zinc-800 text-zinc-900 dark:text-zinc-100' : 'text-zinc-600 dark:text-zinc-400'}"
+            class="p-1.5 rounded-lg hover:bg-zinc-200 dark:hover:bg-zinc-800 cursor-pointer transition-colors duration-200 {showConfig ? 'bg-zinc-200 dark:bg-zinc-800 text-zinc-900 dark:text-zinc-100' : 'text-zinc-600 dark:text-zinc-400'}"
             title={t('header.settings_btn')}
             aria-label={t('header.settings_btn')}
           >
@@ -1475,7 +1489,7 @@
           <!-- Theme Toggle -->
           <button
             onclick={toggleTheme}
-            class="p-1.5 rounded-lg hover:bg-zinc-200 dark:hover:bg-zinc-800 text-zinc-600 dark:text-zinc-400 cursor-pointer"
+            class="p-1.5 rounded-lg hover:bg-zinc-200 dark:hover:bg-zinc-800 text-zinc-600 dark:text-zinc-400 cursor-pointer transition-colors duration-200"
             title={t('header.theme_btn')}
             aria-label={t('header.theme_btn')}
           >
@@ -1547,19 +1561,19 @@
     <!-- Sub-header: Tunnel/Network Status (esquina superior izquierda) & Mode Selector (centro) -->
     {#if !showConfig}
       <div class="shrink-0 relative flex items-center justify-center pt-2.5 pb-1 px-4 min-h-[44px]">
-        <!-- Esquina superior izquierda: Status del túnel / red local -->
+        <!-- Esquina superior izquierda: Status del servidor -->
         <div class="absolute left-4 top-1/2 -translate-y-1/2 flex items-center">
           <span
-            class="inline-flex items-center gap-1.5 text-xs px-2 py-0.5 rounded-md font-mono font-medium tracking-tight transition-colors duration-150 {isReceiving || isSharing ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20' : 'bg-zinc-200/60 dark:bg-zinc-900 text-zinc-500 dark:text-zinc-400 border border-zinc-300/60 dark:border-zinc-800'}"
-            title={isReceiving || isSharing ? (configState.networkMode === 'lan_only' ? t('status.lan_active') : t('status.tunnel_active')) : (configState.networkMode === 'lan_only' ? t('status.lan_inactive') : t('status.tunnel_inactive'))}
+            class="inline-flex items-center gap-1.5 text-xs px-2 py-0.5 rounded-md font-mono font-medium tracking-tight transition-colors duration-200 {isReceiving || isSharing ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20' : 'bg-zinc-200/60 dark:bg-zinc-900 text-zinc-500 dark:text-zinc-400 border border-zinc-300/60 dark:border-zinc-800'}"
+            title={isReceiving || isSharing ? t('status.server_active') : t('status.server_inactive')}
           >
             <span class="w-1.5 h-1.5 rounded-full shrink-0 {isReceiving || isSharing ? 'bg-emerald-500 animate-pulse' : 'bg-zinc-400 dark:bg-zinc-600'}"></span>
             {#if isReceiving || isSharing}
-              <span class="hidden min-[480px]:inline">{configState.networkMode === 'lan_only' ? t('status.lan_active') : t('status.tunnel_active')}</span>
-              <span class="min-[480px]:hidden">{configState.networkMode === 'lan_only' ? t('status.lan_active_short') : t('status.tunnel_active_short')}</span>
+              <span class="hidden min-[480px]:inline">{t('status.server_active')}</span>
+              <span class="min-[480px]:hidden">{t('status.server_active_short')}</span>
             {:else}
-              <span class="hidden min-[480px]:inline">{configState.networkMode === 'lan_only' ? t('status.lan_inactive') : t('status.tunnel_inactive')}</span>
-              <span class="min-[480px]:hidden">{configState.networkMode === 'lan_only' ? t('status.lan_active_short') : t('status.tunnel_active_short')}</span>
+              <span class="hidden min-[480px]:inline">{t('status.server_inactive')}</span>
+              <span class="min-[480px]:hidden">{t('status.server_inactive_short')}</span>
             {/if}
           </span>
         </div>
@@ -2120,7 +2134,7 @@
                     ondrop={handleItemDrop}
                     ondragend={handleItemDragEnd}
                     class="pl-2.5 pr-4 flex items-center justify-between gap-3 text-sm select-none outline-none border-b border-zinc-100 dark:border-zinc-800/60 last:border-b-0
-                      {draggedFileId !== null ? 'transition-none [&_*]:pointer-events-none' : 'transition-colors duration-150'}
+                      {draggedFileId !== null ? 'transition-none [&_*]:pointer-events-none' : 'transition-colors duration-200'}
                       {draggedFileId === f.id ? 'opacity-40 bg-zinc-100 dark:bg-zinc-800' : (draggedFileId === null ? 'hover:bg-zinc-50/50 dark:hover:bg-zinc-800/30' : '')}"
                     style="padding-top: clamp(0.4rem, 1.1vh, 0.65rem); padding-bottom: clamp(0.4rem, 1.1vh, 0.65rem);"
                   >
@@ -2376,7 +2390,7 @@
                     </div>
                     <div class="flex items-center gap-1 text-zinc-400 group-hover:text-zinc-600 dark:group-hover:text-zinc-300 transition-colors">
                       <span class="text-[11px] font-normal">{isIndividualLinksExpanded ? t('send.active.hide') : t('send.active.show')}</span>
-                      <ChevronDown class="w-3.5 h-3.5 transform transition-transform duration-250 ease-out {isIndividualLinksExpanded ? 'rotate-180' : 'rotate-0'}" />
+                      <ChevronDown class="w-3.5 h-3.5 transform transition-transform duration-200 ease-out {isIndividualLinksExpanded ? 'rotate-180' : 'rotate-0'}" />
                     </div>
                   </button>
 

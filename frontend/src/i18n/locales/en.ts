@@ -16,12 +16,10 @@ export const en = {
   'header.window.close': 'Close',
 
   // Status & Mode Selector
-  'status.lan_active': 'local network active',
-  'status.lan_active_short': 'local network',
-  'status.tunnel_active': 'tunnel active',
-  'status.tunnel_active_short': 'tunnel',
-  'status.lan_inactive': 'local network inactive',
-  'status.tunnel_inactive': 'tunnel inactive',
+  'status.server_active': 'server active',
+  'status.server_active_short': 'active',
+  'status.server_inactive': 'server inactive',
+  'status.server_inactive_short': 'inactive',
   'mode.send': 'Send',
   'mode.receive': 'Receive',
 

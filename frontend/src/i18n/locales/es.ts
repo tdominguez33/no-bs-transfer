@@ -18,12 +18,10 @@ export const es: Record<keyof typeof en, string> = {
   'header.window.close': 'Cerrar',
 
   // Status & Mode Selector
-  'status.lan_active': 'red local activa',
-  'status.lan_active_short': 'red local',
-  'status.tunnel_active': 'túnel activo',
-  'status.tunnel_active_short': 'túnel',
-  'status.lan_inactive': 'red local inactiva',
-  'status.tunnel_inactive': 'túnel inactivo',
+  'status.server_active': 'servidor activo',
+  'status.server_active_short': 'activo',
+  'status.server_inactive': 'servidor inactivo',
+  'status.server_inactive_short': 'inactivo',
   'mode.send': 'Enviar',
   'mode.receive': 'Recibir',
 
