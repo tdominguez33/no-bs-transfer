@@ -212,7 +212,7 @@ func (a *App) CheckInternetAccess() bool {
 // SelectFiles opens native Windows file dialog allowing multiple selection
 func (a *App) SelectFiles() ([]*transfer.SharedFile, error) {
 	title := "Select one or more files"
-	if a.GetConfig().Language == config.LanguageES {
+	if a.GetConfig().EffectiveLanguage() == config.LanguageES {
 		title = "Seleccionar uno o más archivos"
 	}
 	filePaths, err := wailsRuntime.OpenMultipleFilesDialog(a.ctx, wailsRuntime.OpenDialogOptions{
@@ -872,7 +872,7 @@ func (a *App) SetDownloadDir(dir string) error {
 func (a *App) SelectDownloadDir() (string, error) {
 	current := a.GetDownloadDir()
 	title := "Select download folder"
-	if a.GetConfig().Language == config.LanguageES {
+	if a.GetConfig().EffectiveLanguage() == config.LanguageES {
 		title = "Seleccionar carpeta de descargas"
 	}
 	chosen, err := wailsRuntime.OpenDirectoryDialog(a.ctx, wailsRuntime.OpenDialogOptions{

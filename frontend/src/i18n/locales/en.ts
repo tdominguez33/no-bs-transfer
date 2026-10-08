@@ -34,6 +34,8 @@ export const en = {
   'settings.active_tunnel_warning': 'A tunnel is currently active. Any saved changes will apply on the next session.',
   'settings.language.title': 'Language',
   'settings.language.desc': 'Select the application display language.',
+  'settings.language.system': 'System default',
+  'settings.language.system_desc': 'Match operating system language',
   'settings.cloudflared.title': 'Tunnel Component (Cloudflared)',
   'settings.cloudflared.desc': 'Engine responsible for generating encrypted public Cloudflare links.',
   'settings.cloudflared.installed': 'Installed',

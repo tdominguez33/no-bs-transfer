@@ -11,8 +11,9 @@ import (
 
 // Language constants
 const (
-	LanguageEN = "en"
-	LanguageES = "es"
+	LanguageSystem = "system"
+	LanguageEN     = "en"
+	LanguageES     = "es"
 )
 
 // Network mode constants
@@ -33,6 +34,21 @@ type AppConfig struct {
 	DownloadDir     string `json:"downloadDir"`
 	WindowWidth     int    `json:"windowWidth,omitempty"`
 	WindowHeight    int    `json:"windowHeight,omitempty"`
+}
+
+// EffectiveLanguage returns the resolved language code ("en" or "es").
+// If Language is "system" or empty, it automatically detects the OS language.
+func (cfg *AppConfig) EffectiveLanguage() string {
+	if cfg == nil {
+		return DetectSystemLanguage()
+	}
+	if cfg.Language == LanguageES {
+		return LanguageES
+	}
+	if cfg.Language == LanguageEN {
+		return LanguageEN
+	}
+	return DetectSystemLanguage()
 }
 
 var (
@@ -211,7 +227,7 @@ func Load() *AppConfig {
 
 	defaultAppData := GetAppDataConfigPath()
 	cfg := &AppConfig{
-		Language:        LanguageEN,
+		Language:        LanguageSystem,
 		NetworkMode:     NetworkModeBoth,
 		UseCustomDomain: false,
 		CustomDomain:    "",
@@ -231,8 +247,8 @@ func Load() *AppConfig {
 			if err := json.Unmarshal(data, cfg); err == nil {
 				cfg.SavePortable = true
 				cfg.CustomDomain = CleanDomainHost(cfg.CustomDomain)
-				if cfg.Language != LanguageES && cfg.Language != LanguageEN {
-					cfg.Language = LanguageEN
+				if cfg.Language != LanguageES && cfg.Language != LanguageEN && cfg.Language != LanguageSystem {
+					cfg.Language = LanguageSystem
 				}
 				if cfg.NetworkMode != NetworkModeLANOnly && cfg.NetworkMode != NetworkModeBoth {
 					cfg.NetworkMode = NetworkModeBoth
@@ -266,8 +282,8 @@ func Load() *AppConfig {
 		if err := json.Unmarshal(data, cfg); err == nil {
 			cfg.SavePortable = false
 			cfg.CustomDomain = CleanDomainHost(cfg.CustomDomain)
-			if cfg.Language != LanguageES && cfg.Language != LanguageEN {
-				cfg.Language = LanguageEN
+			if cfg.Language != LanguageES && cfg.Language != LanguageEN && cfg.Language != LanguageSystem {
+				cfg.Language = LanguageSystem
 			}
 			if cfg.NetworkMode != NetworkModeLANOnly && cfg.NetworkMode != NetworkModeBoth {
 				cfg.NetworkMode = NetworkModeBoth
@@ -296,8 +312,8 @@ func Save(cfg *AppConfig) error {
 	configMu.Lock()
 	defer configMu.Unlock()
 
-	if cfg.Language != LanguageES && cfg.Language != LanguageEN {
-		cfg.Language = LanguageEN
+	if cfg.Language != LanguageES && cfg.Language != LanguageEN && cfg.Language != LanguageSystem {
+		cfg.Language = LanguageSystem
 	}
 
 	// Clean domain: strip protocol, paths, and trailing slashes so it's always stored without https://

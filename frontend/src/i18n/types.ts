@@ -1,7 +1,9 @@
-export type LanguageCode = 'en' | 'es';
+export type LanguagePreference = 'system' | 'en' | 'es';
+export type LocaleCode = 'en' | 'es';
+export type LanguageCode = LanguagePreference;
 
 export interface LanguageOption {
-  code: LanguageCode;
+  code: LanguagePreference;
   label: string;
   nativeName: string;
 }

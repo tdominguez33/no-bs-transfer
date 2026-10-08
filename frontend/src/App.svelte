@@ -129,7 +129,7 @@
 
   // Configuration State
   let configState = $state<config.AppConfig>({
-    language: 'en',
+    language: 'system',
     networkMode: 'both',
     useCustomDomain: false,
     customDomain: '',
@@ -415,8 +415,15 @@
 
   let lastSavedConfigJSON = '';
   let isLangDropdownOpen = $state(false);
-  let currentLang = $derived(
-    SUPPORTED_LANGUAGES.find(l => l.code === i18n.locale) || SUPPORTED_LANGUAGES[0]
+
+  let systemDetectedName = $derived(
+    i18n.systemLocale === 'es' ? 'Español' : 'English'
+  );
+
+  let triggerLabel = $derived(
+    i18n.preference === 'system'
+      ? `${t('settings.language.system')} (${systemDetectedName})`
+      : (SUPPORTED_LANGUAGES.find(l => l.code === i18n.preference)?.nativeName || 'English')
   );
 
   function handleLanguageChange(newLang: LanguageCode) {
@@ -425,7 +432,7 @@
     configState.language = newLang;
     i18n.setLocale(newLang);
     if (typeof document !== 'undefined') {
-      document.documentElement.lang = newLang;
+      document.documentElement.lang = i18n.locale;
     }
     performSave();
   }
@@ -434,10 +441,10 @@
     try {
       const loaded = await GetConfig();
       if (loaded) {
-        const lang = (loaded.language as LanguageCode) || 'en';
+        const lang = (loaded.language as LanguageCode) || 'system';
         i18n.setLocale(lang);
         if (typeof document !== 'undefined') {
-          document.documentElement.lang = lang;
+          document.documentElement.lang = i18n.locale;
         }
         configState = {
           language: lang,
@@ -576,7 +583,7 @@
     const portVal = Number(configState.fixedPort);
     const toSave = {
       ...configState,
-      language: configState.language || 'en',
+      language: configState.language || 'system',
       networkMode: configState.networkMode === 'lan_only' ? 'lan_only' : 'both',
       fixedPort: isNaN(portVal) || portVal < 1024 ? 56789 : Math.round(portVal),
       customDomain: cleanDomainInput(configState.customDomain),
@@ -1660,8 +1667,8 @@
                   </p>
                 </div>
 
-                <!-- Custom Language Dropdown (Matching Width & Vector Flag Icons) -->
-                <div class="relative shrink-0 select-none w-48">
+                <!-- Custom Language Dropdown -->
+                <div class="relative shrink-0 select-none w-60">
                   <!-- Trigger button -->
                   <button
                     type="button"
@@ -1673,7 +1680,7 @@
                     aria-haspopup="listbox"
                     aria-expanded={isLangDropdownOpen}
                   >
-                    <span class="font-medium text-xs truncate">{currentLang.nativeName}</span>
+                    <span class="font-medium text-xs truncate">{triggerLabel}</span>
                     <ChevronDown class="w-3.5 h-3.5 text-zinc-400 dark:text-zinc-500 shrink-0 transform transition-transform duration-200 {isLangDropdownOpen ? 'rotate-180' : 'rotate-0'}" />
                   </button>
 
@@ -1697,12 +1704,18 @@
                         <button
                           type="button"
                           role="option"
-                          aria-selected={i18n.locale === lang.code}
+                          aria-selected={i18n.preference === lang.code}
                           onclick={() => handleLanguageChange(lang.code)}
-                          class="w-full px-3 py-2 text-xs flex items-center justify-between gap-2.5 transition-colors cursor-pointer text-left {i18n.locale === lang.code ? 'bg-zinc-100 dark:bg-zinc-800/80 text-zinc-900 dark:text-zinc-100 font-medium' : 'text-zinc-600 dark:text-zinc-400 hover:bg-zinc-50 dark:hover:bg-zinc-800/40 hover:text-zinc-900 dark:hover:text-zinc-200'}"
+                          class="w-full px-3 py-2 text-xs flex items-center justify-between gap-2.5 transition-colors cursor-pointer text-left {i18n.preference === lang.code ? 'bg-zinc-100 dark:bg-zinc-800/80 text-zinc-900 dark:text-zinc-100 font-medium' : 'text-zinc-600 dark:text-zinc-400 hover:bg-zinc-50 dark:hover:bg-zinc-800/40 hover:text-zinc-900 dark:hover:text-zinc-200'}"
                         >
-                          <span class="truncate font-medium">{lang.nativeName}</span>
-                          {#if i18n.locale === lang.code}
+                          <span class="truncate font-medium">
+                            {#if lang.code === 'system'}
+                              {t('settings.language.system')} <span class="text-zinc-400 dark:text-zinc-500 font-normal">({systemDetectedName})</span>
+                            {:else}
+                              {lang.nativeName}
+                            {/if}
+                          </span>
+                          {#if i18n.preference === lang.code}
                             <Check class="w-3.5 h-3.5 text-zinc-900 dark:text-zinc-100 shrink-0 stroke-[2.5]" />
                           {/if}
                         </button>

@@ -36,6 +36,8 @@ export const es: Record<keyof typeof en, string> = {
   'settings.active_tunnel_warning': 'Hay un túnel activo. Cualquier cambio guardado se aplicará en la próxima sesión.',
   'settings.language.title': 'Idioma',
   'settings.language.desc': 'Selecciona el idioma de la aplicación.',
+  'settings.language.system': 'Idioma del sistema',
+  'settings.language.system_desc': 'Usar el idioma del sistema operativo',
   'settings.cloudflared.title': 'Componente de Túnel (Cloudflared)',
   'settings.cloudflared.desc': 'Motor responsable de generar los enlaces públicos y cifrados de Cloudflare.',
   'settings.cloudflared.installed': 'Instalado',
