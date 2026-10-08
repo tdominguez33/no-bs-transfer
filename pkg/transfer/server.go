@@ -420,11 +420,11 @@ func (s *Server) handleLanding(w http.ResponseWriter, r *http.Request) {
 }
 
 var landingTemplate = template.Must(template.New("landing").Parse(`<!DOCTYPE html>
-<html lang="es">
+<html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Descarga de archivos</title>
+  <title>File Download</title>
   <style>
     :root {
       --bg: #09090b;
@@ -557,8 +557,8 @@ var landingTemplate = template.Must(template.New("landing").Parse(`<!DOCTYPE htm
 <body>
   <div class="container">
     <div class="header">
-      <h1 class="title">Archivos disponibles</h1>
-      <p class="subtitle">Toca o haz clic en descargar para transferir directamente desde el anfitrión.</p>
+      <h1 class="title" id="pageTitle">Available files</h1>
+      <p class="subtitle" id="pageSubtitle">Tap or click download to transfer directly from the host.</p>
     </div>
 
     <div class="card">
@@ -568,12 +568,22 @@ var landingTemplate = template.Must(template.New("landing").Parse(`<!DOCTYPE htm
           <div class="file-name">{{.Name}}</div>
           <div class="file-size">{{.Size}}</div>
         </div>
-        <a href="/{{.ID}}" class="btn" download>
-          Descargar
+        <a href="/{{.ID}}" class="btn download-btn" download>
+          Download
         </a>
       </div>
       {{end}}
     </div>
   </div>
+  <script>
+    const isEs = (navigator.language || navigator.userLanguage || '').toLowerCase().startsWith('es');
+    if (isEs) {
+      document.documentElement.lang = 'es';
+      document.title = 'Descarga de archivos';
+      const t = document.getElementById('pageTitle'); if (t) t.textContent = 'Archivos disponibles';
+      const s = document.getElementById('pageSubtitle'); if (s) s.textContent = 'Toca o haz clic en descargar para transferir directamente desde el anfitrión.';
+      document.querySelectorAll('.download-btn').forEach(b => b.textContent = 'Descargar');
+    }
+  </script>
 </body>
 </html>`))

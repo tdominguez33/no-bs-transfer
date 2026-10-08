@@ -443,11 +443,11 @@ func (s *ReceiveServer) handleUpload(w http.ResponseWriter, r *http.Request) {
 }
 
 var receivePageTemplate = template.Must(template.New("receive").Parse(`<!DOCTYPE html>
-<html lang="es">
+<html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <title>Subir archivos - no-bs-transfer</title>
+  <title>Upload files - no-bs-transfer</title>
   <style>
     :root {
       --bg: #09090b;
@@ -755,10 +755,10 @@ var receivePageTemplate = template.Must(template.New("receive").Parse(`<!DOCTYPE
     <div class="header">
       <div class="badge">
         <span class="badge-dot"></span>
-        <span>Receptor conectado</span>
+        <span id="badgeText">Receiver connected</span>
       </div>
-      <h1 class="title">Enviar archivos a tu PC</h1>
-      <p class="subtitle">Carga fotos, videos o documentos desde este dispositivo para recibirlos de inmediato.</p>
+      <h1 class="title" id="pageTitle">Send files to your PC</h1>
+      <p class="subtitle" id="pageSubtitle">Upload photos, videos or documents from this device to receive them instantly.</p>
     </div>
 
     <!-- Hidden native file input -->
@@ -772,13 +772,13 @@ var receivePageTemplate = template.Must(template.New("receive").Parse(`<!DOCTYPE
         </svg>
       </div>
       <div class="drop-text">
-        <span class="desktop-only">Arrastra archivos aquí o haz clic para seleccionar</span>
-        <span class="mobile-only">Toca aquí para cargar archivos</span>
+        <span class="desktop-only" id="dropDesktop">Drag files here or click to select</span>
+        <span class="mobile-only" id="dropMobile">Tap here to upload files</span>
       </div>
-      <div class="drop-hint">Puedes seleccionar varios archivos a la vez</div>
+      <div class="drop-hint" id="dropHint">You can select multiple files at once</div>
       <button type="button" class="btn-select" id="btnBrowse">
-        <span class="desktop-only">Seleccionar archivos</span>
-        <span class="mobile-only">Cargar archivos</span>
+        <span class="desktop-only" id="browseDesktop">Select files</span>
+        <span class="mobile-only" id="browseMobile">Upload files</span>
       </button>
     </div>
 
@@ -787,6 +787,20 @@ var receivePageTemplate = template.Must(template.New("receive").Parse(`<!DOCTYPE
   </div>
 
   <script>
+    const isEs = (navigator.language || navigator.userLanguage || '').toLowerCase().startsWith('es');
+    if (isEs) {
+      document.documentElement.lang = 'es';
+      document.title = 'Subir archivos - no-bs-transfer';
+      const bt = document.getElementById('badgeText'); if (bt) bt.textContent = 'Receptor conectado';
+      const pt = document.getElementById('pageTitle'); if (pt) pt.textContent = 'Enviar archivos a tu PC';
+      const ps = document.getElementById('pageSubtitle'); if (ps) ps.textContent = 'Carga fotos, videos o documentos desde este dispositivo para recibirlos de inmediato.';
+      const dd = document.getElementById('dropDesktop'); if (dd) dd.textContent = 'Arrastra archivos aquí o haz clic para seleccionar';
+      const dm = document.getElementById('dropMobile'); if (dm) dm.textContent = 'Toca aquí para cargar archivos';
+      const dh = document.getElementById('dropHint'); if (dh) dh.textContent = 'Puedes seleccionar varios archivos a la vez';
+      const bd = document.getElementById('browseDesktop'); if (bd) bd.textContent = 'Seleccionar archivos';
+      const bm = document.getElementById('browseMobile'); if (bm) bm.textContent = 'Cargar archivos';
+    }
+
     const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent) ||
       (window.matchMedia && (window.matchMedia('(hover: none)').matches || window.matchMedia('(pointer: coarse)').matches || window.matchMedia('(max-width: 640px)').matches));
     if (isMobile) {
@@ -857,6 +871,7 @@ var receivePageTemplate = template.Must(template.New("receive").Parse(`<!DOCTYPE
       card.className = 'file-card';
 
       const fileId = 'f_' + Math.random().toString(36).slice(2);
+      const initialStatus = isEs ? 'Subiendo...' : 'Uploading...';
 
       card.innerHTML = 
         '<div class="file-meta">' +
@@ -867,7 +882,7 @@ var receivePageTemplate = template.Must(template.New("receive").Parse(`<!DOCTYPE
           '<div class="progress-bar-fill" id="pb_' + fileId + '" style="width: 0%;"></div>' +
         '</div>' +
         '<div class="file-status-text">' +
-          '<span class="status-badge" id="st_' + fileId + '">Subiendo...</span>' +
+          '<span class="status-badge" id="st_' + fileId + '">' + initialStatus + '</span>' +
           '<span id="sp_' + fileId + '">0%</span>' +
         '</div>';
 
@@ -908,20 +923,20 @@ var receivePageTemplate = template.Must(template.New("receive").Parse(`<!DOCTYPE
         if (xhr.status >= 200 && xhr.status < 300) {
           pb.style.width = '100%';
           pb.classList.add('done');
-          st.textContent = '✓ Completado';
+          st.textContent = isEs ? '✓ Completado' : '✓ Completed';
           st.className = 'status-badge done';
           sp.textContent = '100%';
         } else {
           pb.classList.add('error');
-          st.textContent = 'Error al subir';
+          st.textContent = isEs ? 'Error al subir' : 'Upload error';
           st.className = 'status-badge error';
-          sp.textContent = xhr.statusText || 'Error de red';
+          sp.textContent = xhr.statusText || (isEs ? 'Error de red' : 'Network error');
         }
       });
 
       xhr.addEventListener('error', () => {
         pb.classList.add('error');
-        st.textContent = 'Fallo de conexión';
+        st.textContent = isEs ? 'Fallo de conexión' : 'Connection failed';
         st.className = 'status-badge error';
         sp.textContent = '';
       });

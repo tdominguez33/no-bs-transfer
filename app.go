@@ -211,11 +211,15 @@ func (a *App) CheckInternetAccess() bool {
 
 // SelectFiles opens native Windows file dialog allowing multiple selection
 func (a *App) SelectFiles() ([]*transfer.SharedFile, error) {
+	title := "Select one or more files"
+	if a.GetConfig().Language == config.LanguageES {
+		title = "Seleccionar uno o más archivos"
+	}
 	filePaths, err := wailsRuntime.OpenMultipleFilesDialog(a.ctx, wailsRuntime.OpenDialogOptions{
-		Title: "Seleccionar uno o más archivos",
+		Title: title,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("error al abrir selector de archivos: %w", err)
+		return nil, fmt.Errorf("error opening file picker: %w", err)
 	}
 
 	return a.LoadFilesFromPaths(filePaths)
@@ -867,12 +871,16 @@ func (a *App) SetDownloadDir(dir string) error {
 // SelectDownloadDir opens native directory selection dialog and persists the choice
 func (a *App) SelectDownloadDir() (string, error) {
 	current := a.GetDownloadDir()
+	title := "Select download folder"
+	if a.GetConfig().Language == config.LanguageES {
+		title = "Seleccionar carpeta de descargas"
+	}
 	chosen, err := wailsRuntime.OpenDirectoryDialog(a.ctx, wailsRuntime.OpenDialogOptions{
-		Title:            "Seleccionar carpeta de descargas",
+		Title:            title,
 		DefaultDirectory: current,
 	})
 	if err != nil {
-		return "", fmt.Errorf("error al abrir selector de carpetas: %w", err)
+		return "", fmt.Errorf("error opening folder picker: %w", err)
 	}
 	if chosen == "" {
 		return current, nil

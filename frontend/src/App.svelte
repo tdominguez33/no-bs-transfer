@@ -71,8 +71,10 @@
     FolderDown,
     ExternalLink,
     WifiOff,
-    RefreshCw
+    RefreshCw,
+    Languages
   } from '@lucide/svelte';
+  import { i18n, t, SUPPORTED_LANGUAGES, type LanguageCode } from './i18n/index.svelte';
 
   interface ReceivedFile {
     id: string;
@@ -127,6 +129,7 @@
 
   // Configuration State
   let configState = $state<config.AppConfig>({
+    language: 'en',
     networkMode: 'both',
     useCustomDomain: false,
     customDomain: '',
@@ -225,7 +228,7 @@
         cloudflaredStatus = res;
       }
     } catch (e) {
-      console.error('Error al consultar estado de cloudflared:', e);
+      console.error(t('error.cloudflared_status'), e);
     }
   }
 
@@ -236,7 +239,7 @@
       await DownloadCloudflared();
       await refreshCloudflaredStatus();
     } catch (err: any) {
-      errorMessage = err?.message || 'Error al descargar cloudflared';
+      errorMessage = err?.message || t('error.download_cloudflared');
     } finally {
       isDownloadingCloudflared = false;
       cloudflaredDownloadProgress.show = false;
@@ -411,12 +414,33 @@
   }
 
   let lastSavedConfigJSON = '';
+  let isLangDropdownOpen = $state(false);
+  let currentLang = $derived(
+    SUPPORTED_LANGUAGES.find(l => l.code === i18n.locale) || SUPPORTED_LANGUAGES[0]
+  );
+
+  function handleLanguageChange(newLang: LanguageCode) {
+    isLangDropdownOpen = false;
+    if (configState.language === newLang) return;
+    configState.language = newLang;
+    i18n.setLocale(newLang);
+    if (typeof document !== 'undefined') {
+      document.documentElement.lang = newLang;
+    }
+    performSave();
+  }
 
   async function loadConfig() {
     try {
       const loaded = await GetConfig();
       if (loaded) {
+        const lang = (loaded.language as LanguageCode) || 'en';
+        i18n.setLocale(lang);
+        if (typeof document !== 'undefined') {
+          document.documentElement.lang = lang;
+        }
         configState = {
+          language: lang,
           networkMode: loaded.networkMode === 'lan_only' ? 'lan_only' : 'both',
           useCustomDomain: loaded.useCustomDomain || false,
           customDomain: cleanDomainInput(loaded.customDomain || ''),
@@ -427,6 +451,7 @@
         };
         defaultDownloadDir = loaded.downloadDir || '';
         lastSavedConfigJSON = JSON.stringify({
+          language: configState.language,
           networkMode: configState.networkMode,
           useCustomDomain: configState.useCustomDomain,
           customDomain: configState.customDomain,
@@ -437,7 +462,7 @@
         });
       }
     } catch (err: any) {
-      console.error('Error al cargar configuración:', err);
+      console.error(t('error.load_config'), err);
     }
   }
 
@@ -551,12 +576,14 @@
     const portVal = Number(configState.fixedPort);
     const toSave = {
       ...configState,
+      language: configState.language || 'en',
       networkMode: configState.networkMode === 'lan_only' ? 'lan_only' : 'both',
       fixedPort: isNaN(portVal) || portVal < 1024 ? 56789 : Math.round(portVal),
       customDomain: cleanDomainInput(configState.customDomain),
       downloadDir: configState.downloadDir || ''
     };
     const currentJSON = JSON.stringify({
+      language: toSave.language,
       networkMode: toSave.networkMode,
       useCustomDomain: toSave.useCustomDomain,
       customDomain: toSave.customDomain,
@@ -574,7 +601,7 @@
       await SaveConfig(toSave);
       lastSavedConfigJSON = currentJSON;
     } catch (err: any) {
-      errorMessage = err?.message || 'Error al guardar la configuración';
+      errorMessage = err?.message || t('error.save_config');
     }
   }
 
@@ -646,7 +673,7 @@
             }
           }
         } catch (err: any) {
-          errorMessage = err?.message || 'Error al procesar archivos arrastrados';
+          errorMessage = err?.message || t('error.dropped_files');
         }
       }
     }, false);
@@ -688,7 +715,7 @@
     EventsOn('cloudflared_download_progress', (p: { downloaded: number; total: number; percent: number; speed: number; done: boolean; error?: string }) => {
       if (p.error) {
         if (!p.error.toLowerCase().includes('cancel')) {
-          errorMessage = 'Fallo al descargar componente de túnel: ' + p.error;
+          errorMessage = t('error.download_tunnel_component', { err: p.error });
         }
         cloudflaredDownloadProgress.show = false;
         isDownloadingCloudflared = false;
@@ -868,7 +895,7 @@
         addFiles(selected);
       }
     } catch (err: any) {
-      errorMessage = err?.message || 'Error al seleccionar archivos';
+      errorMessage = err?.message || t('error.select_files');
     }
   }
 
@@ -881,7 +908,7 @@
         await handleAddFilesToActiveShare(selected);
       }
     } catch (err: any) {
-      errorMessage = err?.message || 'Error al seleccionar archivos adicionales';
+      errorMessage = err?.message || t('error.select_more_files');
     }
   }
 
@@ -900,7 +927,7 @@
         addFiles(toAdd);
       }
     } catch (err: any) {
-      errorMessage = err?.message || 'Error al añadir archivos a la sesión activa';
+      errorMessage = err?.message || t('error.add_to_share');
     } finally {
       isAddingMore = false;
     }
@@ -912,7 +939,7 @@
 
     if (configState.networkMode === 'both' && configState.useCustomDomain) {
       if (!configState.customDomain.trim() || !configState.tunnelToken.trim()) {
-        errorMessage = 'Has activado dominio propio pero falta completar el dominio o el token en Configuración.';
+        errorMessage = t('error.custom_domain_missing');
         showConfig = true;
         return;
       }
@@ -927,14 +954,14 @@
           isStarting = false;
           updateOnlineStatus(false);
           await handleNetworkModeChange('lan_only');
-          errorMessage = 'No hay conexión a internet, modo no disponible';
+          errorMessage = t('error.no_internet_mode');
           return;
         }
       } catch {
         isStarting = false;
         updateOnlineStatus(false);
         await handleNetworkModeChange('lan_only');
-        errorMessage = 'No hay conexión a internet, modo no disponible';
+        errorMessage = t('error.no_internet_mode');
         return;
       }
     }
@@ -948,12 +975,13 @@
       shareLinkTarget = result.networkMode === 'lan_only' ? 'local' : 'internet';
       isIndividualLinksExpanded = false;
     } catch (err: any) {
-      const msg = err?.message || 'Error al iniciar la transferencia';
+      const msg = err?.message || t('error.start_share');
       errorMessage = msg;
       if (
         msg.includes('No hay conexión a internet') ||
         msg.includes('modo no disponible') ||
-        msg.includes('no disponible')
+        msg.includes('no disponible') ||
+        msg.toLowerCase().includes('no internet')
       ) {
         updateOnlineStatus(false);
         await handleNetworkModeChange('lan_only');
@@ -975,7 +1003,7 @@
       isIndividualLinksExpanded = false;
       stats = { totalSpeed: 0, totalBytesSent: 0, activeGuests: 0, transfers: [] };
     } catch (err: any) {
-      errorMessage = err?.message || 'Error al detener la sesión';
+      errorMessage = err?.message || t('error.stop_share');
     } finally {
       isStopping = false;
     }
@@ -1018,7 +1046,7 @@
     errorMessage = '';
     if (configState.networkMode === 'both' && configState.useCustomDomain) {
       if (!configState.customDomain.trim() || !configState.tunnelToken.trim()) {
-        errorMessage = 'Has activado dominio propio pero falta completar el dominio o el token en Configuración.';
+        errorMessage = t('error.custom_domain_missing');
         showConfig = true;
         return;
       }
@@ -1033,14 +1061,14 @@
           isStartingReceive = false;
           updateOnlineStatus(false);
           await handleNetworkModeChange('lan_only');
-          errorMessage = 'No hay conexión a internet, modo no disponible';
+          errorMessage = t('error.no_internet_mode');
           return;
         }
       } catch {
         isStartingReceive = false;
         updateOnlineStatus(false);
         await handleNetworkModeChange('lan_only');
-        errorMessage = 'No hay conexión a internet, modo no disponible';
+        errorMessage = t('error.no_internet_mode');
         return;
       }
     }
@@ -1055,12 +1083,13 @@
         await generateReceiveQR(getActiveReceiveUrl());
       }
     } catch (err: any) {
-      const msg = err?.message || 'Error al iniciar el receptor de archivos';
+      const msg = err?.message || t('error.start_receive');
       errorMessage = msg;
       if (
         msg.includes('No hay conexión a internet') ||
         msg.includes('modo no disponible') ||
-        msg.includes('no disponible')
+        msg.includes('no disponible') ||
+        msg.toLowerCase().includes('no internet')
       ) {
         updateOnlineStatus(false);
         await handleNetworkModeChange('lan_only');
@@ -1082,7 +1111,7 @@
       receiveQrDataUrl = '';
       receiveQrTarget = 'internet';
     } catch (err: any) {
-      errorMessage = err?.message || 'Error al detener la recepción';
+      errorMessage = err?.message || t('error.stop_receive');
     } finally {
       isStoppingReceive = false;
     }
@@ -1119,7 +1148,7 @@
         await performSave();
       }
     } catch (err: any) {
-      errorMessage = err?.message || 'Error al seleccionar carpeta de descargas';
+      errorMessage = err?.message || t('error.select_download_dir');
     }
   }
 
@@ -1127,7 +1156,7 @@
     try {
       await OpenDownloadDir();
     } catch (err: any) {
-      errorMessage = err?.message || 'Error al abrir la carpeta de descargas';
+      errorMessage = err?.message || t('error.open_download_dir');
     }
   }
 
@@ -1148,7 +1177,7 @@
     try {
       await OpenFile(rf.savedPath);
     } catch (err: any) {
-      setItemWarning(rf.id, 'El archivo fue movido o eliminado');
+      setItemWarning(rf.id, t('receive.ready.file_missing'));
     }
   }
 
@@ -1156,7 +1185,7 @@
     try {
       await ShowFileInFolder(rf.savedPath);
     } catch (err: any) {
-      setItemWarning(rf.id, 'El archivo fue movido o eliminado');
+      setItemWarning(rf.id, t('receive.ready.file_missing'));
     }
   }
 
@@ -1188,7 +1217,7 @@
         files = files.filter(f => remainingIDs.has(f.id));
       }
     } catch (err: any) {
-      errorMessage = err?.message || 'Error al eliminar el archivo de la sesión';
+      errorMessage = err?.message || t('error.remove_from_share');
     } finally {
       isDeleting = false;
     }
@@ -1248,7 +1277,7 @@
         canToggle
       };
     } catch (err) {
-      errorMessage = 'Error al generar el código QR';
+      errorMessage = t('error.generate_qr');
     }
   }
 
@@ -1272,7 +1301,7 @@
       qrModal.activeTarget = nextTarget;
       qrModal.qrSvg = nextQrSvg;
     } catch (err) {
-      console.error('Error al alternar código QR:', err);
+      console.error(t('error.toggle_qr'), err);
     }
   }
 
@@ -1358,11 +1387,11 @@
               type="button"
               onclick={() => handleNetworkModeChange('lan_only')}
               disabled={isSharing || isReceiving || isStarting || isStartingReceive || isStopping || isStoppingReceive}
-              aria-label="Red local"
+              aria-label={t('header.network_mode.local')}
               class="relative z-10 px-2.5 py-1 rounded-md flex items-center justify-center gap-1.5 font-medium transition-colors duration-200 cursor-pointer disabled:opacity-50 disabled:cursor-default {configState.networkMode === 'lan_only' ? 'text-emerald-600 dark:text-emerald-400 font-semibold' : 'text-zinc-500 enabled:hover:text-zinc-800 dark:enabled:hover:text-zinc-200'}"
             >
               <EthernetPort class="w-3.5 h-3.5 shrink-0" />
-              <span class="hidden min-[580px]:inline">Red local</span>
+              <span class="hidden min-[580px]:inline">{t('header.network_mode.local')}</span>
             </button>
 
             <!-- Option 2: Internet -->
@@ -1376,11 +1405,11 @@
                 type="button"
                 onclick={() => handleNetworkModeChange('both')}
                 disabled={isSharing || isReceiving || isStarting || isStartingReceive || isStopping || isStoppingReceive || !isOnline}
-                aria-label="Internet"
+                aria-label={t('header.network_mode.internet')}
                 class="w-full px-2.5 py-1 rounded-md flex items-center justify-center gap-1.5 font-medium transition-colors duration-200 {configState.networkMode === 'both' ? 'text-indigo-600 dark:text-indigo-400 font-semibold' : 'text-zinc-500 enabled:hover:text-zinc-800 dark:enabled:hover:text-zinc-200'} {!isOnline ? 'opacity-40 cursor-default' : 'cursor-pointer disabled:opacity-50 disabled:cursor-default'}"
               >
                 <Globe class="w-3.5 h-3.5 shrink-0" />
-                <span class="hidden min-[580px]:inline">Internet</span>
+                <span class="hidden min-[580px]:inline">{t('header.network_mode.internet')}</span>
               </button>
             </div>
 
@@ -1401,9 +1430,9 @@
                     <WifiOff class="w-3.5 h-3.5" />
                   </div>
                   <div class="flex flex-col gap-0.5 min-w-0">
-                    <span class="font-semibold text-xs text-zinc-900 dark:text-zinc-100">Sin conexión a internet</span>
+                    <span class="font-semibold text-xs text-zinc-900 dark:text-zinc-100">{t('header.offline.title')}</span>
                     <span class="text-[11px] text-zinc-500 dark:text-zinc-400 leading-normal">
-                      El túnel de Cloudflare no está disponible. Usa <strong>Red local</strong> para transferir en tu Wi-Fi.
+                      {t('header.offline.desc_prefix')} <strong>{t('header.offline.desc_strong')}</strong> {t('header.offline.desc_suffix')}
                     </span>
                   </div>
                 </div>
@@ -1417,7 +1446,7 @@
                     class="px-2.5 py-1 rounded-lg text-[11px] font-medium transition-all duration-150 flex items-center gap-1.5 cursor-pointer disabled:cursor-pointer shadow-2xs shrink-0 select-none {isCheckingConnection ? 'bg-zinc-200 dark:bg-zinc-800 text-zinc-400 dark:text-zinc-500 opacity-70' : 'bg-zinc-900 hover:bg-zinc-800 dark:bg-zinc-100 dark:hover:bg-zinc-200 text-white dark:text-zinc-900'}"
                   >
                     <RefreshCw class="w-3 h-3 shrink-0 {isCheckingConnection ? 'animate-spin' : ''}" />
-                    <span>Reintentar</span>
+                    <span>{t('header.offline.retry')}</span>
                   </button>
                 </div>
               </div>
@@ -1430,8 +1459,8 @@
           <button
             onclick={() => showConfig = !showConfig}
             class="p-1.5 rounded-lg hover:bg-zinc-200 dark:hover:bg-zinc-800 cursor-pointer {showConfig ? 'bg-zinc-200 dark:bg-zinc-800 text-zinc-900 dark:text-zinc-100' : 'text-zinc-600 dark:text-zinc-400'}"
-            title="Configuración"
-            aria-label="Configuración"
+            title={t('header.settings_btn')}
+            aria-label={t('header.settings_btn')}
           >
             <Settings class="w-4 h-4" />
           </button>
@@ -1440,8 +1469,8 @@
           <button
             onclick={toggleTheme}
             class="p-1.5 rounded-lg hover:bg-zinc-200 dark:hover:bg-zinc-800 text-zinc-600 dark:text-zinc-400 cursor-pointer"
-            title="Cambiar tema (Claro / Oscuro)"
-            aria-label="Cambiar tema"
+            title={t('header.theme_btn')}
+            aria-label={t('header.theme_btn')}
           >
             {#if isDark}
               <Sun class="w-4 h-4" />
@@ -1461,8 +1490,8 @@
             type="button"
             onclick={handleMinimise}
             class="h-full w-11 flex items-center justify-center text-zinc-500 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100 hover:bg-zinc-200/80 dark:hover:bg-zinc-800 active:bg-zinc-300 dark:active:bg-zinc-700 transition-colors cursor-pointer"
-            title="Minimizar"
-            aria-label="Minimizar ventana"
+            title={t('header.window.minimize')}
+            aria-label={t('header.window.minimize')}
           >
             <svg class="w-3.5 h-3.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2">
               <line x1="3" y1="8" x2="13" y2="8" />
@@ -1474,8 +1503,8 @@
             type="button"
             onclick={handleToggleMaximise}
             class="h-full w-11 flex items-center justify-center text-zinc-500 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100 hover:bg-zinc-200/80 dark:hover:bg-zinc-800 active:bg-zinc-300 dark:active:bg-zinc-700 transition-colors cursor-pointer"
-            title={isMaximised ? "Restaurar" : "Maximizar"}
-            aria-label={isMaximised ? "Restaurar ventana" : "Maximizar ventana"}
+            title={isMaximised ? t('header.window.restore') : t('header.window.maximize')}
+            aria-label={isMaximised ? t('header.window.restore') : t('header.window.maximize')}
           >
             {#if isMaximised}
               <!-- Restore Icon -->
@@ -1496,8 +1525,8 @@
             type="button"
             onclick={handleClose}
             class="h-full w-11 flex items-center justify-center text-zinc-500 hover:text-white dark:text-zinc-400 dark:hover:text-white hover:bg-red-600 active:bg-red-700 transition-colors cursor-pointer"
-            title="Cerrar"
-            aria-label="Cerrar ventana"
+            title={t('header.window.close')}
+            aria-label={t('header.window.close')}
           >
             <svg class="w-3.5 h-3.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round">
               <line x1="3.5" y1="3.5" x2="12.5" y2="12.5" />
@@ -1515,15 +1544,15 @@
         <div class="absolute left-4 top-1/2 -translate-y-1/2 flex items-center">
           <span
             class="inline-flex items-center gap-1.5 text-xs px-2 py-0.5 rounded-md font-mono font-medium tracking-tight transition-colors duration-150 {isReceiving || isSharing ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20' : 'bg-zinc-200/60 dark:bg-zinc-900 text-zinc-500 dark:text-zinc-400 border border-zinc-300/60 dark:border-zinc-800'}"
-            title={isReceiving || isSharing ? (configState.networkMode === 'lan_only' ? 'Red local activa' : 'Túnel activo') : (configState.networkMode === 'lan_only' ? 'Red local inactiva' : 'Túnel inactivo')}
+            title={isReceiving || isSharing ? (configState.networkMode === 'lan_only' ? t('status.lan_active') : t('status.tunnel_active')) : (configState.networkMode === 'lan_only' ? t('status.lan_inactive') : t('status.tunnel_inactive'))}
           >
             <span class="w-1.5 h-1.5 rounded-full shrink-0 {isReceiving || isSharing ? 'bg-emerald-500 animate-pulse' : 'bg-zinc-400 dark:bg-zinc-600'}"></span>
             {#if isReceiving || isSharing}
-              <span class="hidden min-[480px]:inline">{configState.networkMode === 'lan_only' ? 'red local activa' : 'túnel activo'}</span>
-              <span class="min-[480px]:hidden">{configState.networkMode === 'lan_only' ? 'red local' : 'túnel'}</span>
+              <span class="hidden min-[480px]:inline">{configState.networkMode === 'lan_only' ? t('status.lan_active') : t('status.tunnel_active')}</span>
+              <span class="min-[480px]:hidden">{configState.networkMode === 'lan_only' ? t('status.lan_active_short') : t('status.tunnel_active_short')}</span>
             {:else}
-              <span class="hidden min-[480px]:inline">{configState.networkMode === 'lan_only' ? 'red local inactiva' : 'túnel inactivo'}</span>
-              <span class="min-[480px]:hidden">{configState.networkMode === 'lan_only' ? 'red local' : 'túnel'}</span>
+              <span class="hidden min-[480px]:inline">{configState.networkMode === 'lan_only' ? t('status.lan_inactive') : t('status.tunnel_inactive')}</span>
+              <span class="min-[480px]:hidden">{configState.networkMode === 'lan_only' ? t('status.lan_active_short') : t('status.tunnel_active_short')}</span>
             {/if}
           </span>
         </div>
@@ -1543,7 +1572,7 @@
             class="relative z-10 px-4 py-1.5 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 cursor-pointer disabled:cursor-pointer transition-colors duration-200 {activeMode === 'send' ? 'text-zinc-900 dark:text-zinc-100' : 'text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200'}"
           >
             <Upload class="w-3.5 h-3.5" />
-            <span>Enviar</span>
+            <span>{t('mode.send')}</span>
           </button>
           <button
             type="button"
@@ -1552,7 +1581,7 @@
             class="relative z-10 px-4 py-1.5 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 cursor-pointer disabled:cursor-pointer transition-colors duration-200 {activeMode === 'receive' ? 'text-zinc-900 dark:text-zinc-100' : 'text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200'}"
           >
             <Download class="w-3.5 h-3.5" />
-            <span>Recibir</span>
+            <span>{t('mode.receive')}</span>
           </button>
         </div>
       </div>
@@ -1573,7 +1602,7 @@
               onclick={() => errorMessage = ''}
               class="shrink-0 text-[11px] font-semibold text-red-700 hover:text-red-900 dark:text-red-300 dark:hover:text-red-100 hover:underline cursor-pointer px-1 py-0.5"
             >
-              Descartar
+              {t('alert.dismiss')}
             </button>
           </div>
         </div>
@@ -1591,17 +1620,17 @@
             <div class="flex flex-col gap-0.5">
               <h2 class="text-sm font-semibold text-zinc-900 dark:text-zinc-100 flex items-center gap-2">
                 <Settings class="w-4 h-4 text-zinc-500" />
-                Configuración
+                {t('settings.title')}
               </h2>
             </div>
 
             <!-- Close Cross Button to go back to transferencias -->
             <button
               type="button"
-              onclick={() => { performSave(); showConfig = false; }}
+              onclick={() => { performSave(); showConfig = false; isLangDropdownOpen = false; }}
               class="p-1.5 rounded-lg hover:bg-zinc-200 dark:hover:bg-zinc-800 text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200 transition-colors cursor-pointer"
-              title="Volver a transferencias"
-              aria-label="Cerrar configuración"
+              title={t('settings.back_btn')}
+              aria-label={t('settings.back_btn')}
             >
               <X class="w-5 h-5" />
             </button>
@@ -1612,9 +1641,77 @@
             {#if isSharing || isReceiving}
               <div class="p-3 rounded-lg bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-900/50 flex items-center gap-2 text-xs text-amber-700 dark:text-amber-400 shrink-0">
                 <AlertCircle class="w-4 h-4 shrink-0" />
-                <span>Hay un túnel activo. Cualquier cambio guardado se aplicará en la próxima sesión.</span>
+                <span>{t('settings.active_tunnel_warning')}</span>
               </div>
             {/if}
+
+            <!-- Section 0: Idioma / Language -->
+            <div class="border border-zinc-200 dark:border-zinc-800 rounded-xl bg-white dark:bg-zinc-900/40 p-5 flex flex-col gap-3 shrink-0 transition-colors">
+              <div class="flex items-start justify-between gap-4">
+                <div class="flex flex-col gap-1 flex-1">
+                  <div class="flex items-center gap-2">
+                    <Languages class="w-4 h-4 text-zinc-600 dark:text-zinc-400" />
+                    <h3 class="text-xs font-semibold tracking-wider text-zinc-900 dark:text-zinc-100">
+                      {t('settings.language.title')}
+                    </h3>
+                  </div>
+                  <p class="text-xs text-zinc-500 dark:text-zinc-400 leading-relaxed">
+                    {t('settings.language.desc')}
+                  </p>
+                </div>
+
+                <!-- Custom Language Dropdown (Matching Width & Vector Flag Icons) -->
+                <div class="relative shrink-0 select-none w-48">
+                  <!-- Trigger button -->
+                  <button
+                    type="button"
+                    onclick={(e) => {
+                      e.stopPropagation();
+                      isLangDropdownOpen = !isLangDropdownOpen;
+                    }}
+                    class="w-full h-9 px-3 rounded-lg border border-zinc-200 dark:border-zinc-700/80 bg-zinc-50 dark:bg-zinc-800/80 hover:bg-zinc-100 dark:hover:bg-zinc-800 text-zinc-800 dark:text-zinc-200 text-xs font-medium transition-colors flex items-center justify-between gap-2.5 cursor-pointer shadow-xs focus:outline-none focus:ring-2 focus:ring-zinc-400 dark:focus:ring-zinc-600"
+                    aria-haspopup="listbox"
+                    aria-expanded={isLangDropdownOpen}
+                  >
+                    <span class="font-medium text-xs truncate">{currentLang.nativeName}</span>
+                    <ChevronDown class="w-3.5 h-3.5 text-zinc-400 dark:text-zinc-500 shrink-0 transform transition-transform duration-200 {isLangDropdownOpen ? 'rotate-180' : 'rotate-0'}" />
+                  </button>
+
+                  <!-- Backdrop to dismiss on outside click -->
+                  {#if isLangDropdownOpen}
+                    <div
+                      role="presentation"
+                      tabindex="-1"
+                      class="fixed inset-0 z-20 cursor-default"
+                      onclick={() => isLangDropdownOpen = false}
+                    ></div>
+
+                    <!-- Dropdown Menu (Matches Trigger Width Exactly) -->
+                    <div
+                      role="listbox"
+                      tabindex="-1"
+                      onkeydown={(e) => { if (e.key === 'Escape') isLangDropdownOpen = false; }}
+                      class="absolute left-0 right-0 top-full mt-1.5 w-full rounded-xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 shadow-lg dark:shadow-2xl z-30 py-1 overflow-hidden animate-in fade-in zoom-in-95 duration-150"
+                    >
+                      {#each SUPPORTED_LANGUAGES as lang}
+                        <button
+                          type="button"
+                          role="option"
+                          aria-selected={i18n.locale === lang.code}
+                          onclick={() => handleLanguageChange(lang.code)}
+                          class="w-full px-3 py-2 text-xs flex items-center justify-between gap-2.5 transition-colors cursor-pointer text-left {i18n.locale === lang.code ? 'bg-zinc-100 dark:bg-zinc-800/80 text-zinc-900 dark:text-zinc-100 font-medium' : 'text-zinc-600 dark:text-zinc-400 hover:bg-zinc-50 dark:hover:bg-zinc-800/40 hover:text-zinc-900 dark:hover:text-zinc-200'}"
+                        >
+                          <span class="truncate font-medium">{lang.nativeName}</span>
+                          {#if i18n.locale === lang.code}
+                            <Check class="w-3.5 h-3.5 text-zinc-900 dark:text-zinc-100 shrink-0 stroke-[2.5]" />
+                          {/if}
+                        </button>
+                      {/each}
+                    </div>
+                  {/if}
+                </div>
+              </div>
+            </div>
 
             <!-- Section 1: Componente de Túnel (Cloudflared) -->
             <div class="border border-zinc-200 dark:border-zinc-800 rounded-xl bg-white dark:bg-zinc-900/40 p-5 flex flex-col gap-3 shrink-0 transition-colors">
@@ -1623,11 +1720,11 @@
                   <div class="flex items-center gap-2">
                     <ShieldCheck class="w-4 h-4 text-zinc-600 dark:text-zinc-400" />
                     <h3 class="text-xs font-semibold tracking-wider text-zinc-900 dark:text-zinc-100">
-                      Componente de Túnel (Cloudflared)
+                      {t('settings.cloudflared.title')}
                     </h3>
                   </div>
                   <p class="text-xs text-zinc-500 dark:text-zinc-400 leading-relaxed">
-                    Motor responsable de generar los enlaces públicos y cifrados de Cloudflare.
+                    {t('settings.cloudflared.desc')}
                   </p>
                 </div>
 
@@ -1636,12 +1733,12 @@
                   {#if cloudflaredStatus.installed}
                     <span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium bg-emerald-50 dark:bg-emerald-950/40 text-emerald-600 dark:text-emerald-400 border border-emerald-200 dark:border-emerald-900/60 font-mono">
                       <span class="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>
-                      Instalado
+                      {t('settings.cloudflared.installed')}
                     </span>
                   {:else}
                     <span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium bg-amber-50 dark:bg-amber-950/40 text-amber-600 dark:text-amber-400 border border-amber-200 dark:border-amber-900/60 font-mono">
                       <span class="w-1.5 h-1.5 rounded-full bg-amber-500"></span>
-                      No detectado
+                      {t('settings.cloudflared.not_detected')}
                     </span>
                   {/if}
                 </div>
@@ -1654,7 +1751,7 @@
                     type="button"
                     onclick={() => copyText('cloudflared_path', cloudflaredStatus.path)}
                     class="p-1 text-zinc-500 hover:text-zinc-700 dark:text-zinc-400 dark:hover:text-zinc-200 transition-colors cursor-pointer shrink-0"
-                    title="Copiar ruta"
+                    title={t('settings.cloudflared.copy_path')}
                   >
                     {#if copiedMap['cloudflared_path']}
                       <Check class="w-3.5 h-3.5 text-zinc-800 dark:text-zinc-100" />
@@ -1666,7 +1763,7 @@
               {:else}
                 <div class="mt-1 flex items-center justify-between gap-3 p-3 rounded-lg bg-zinc-50 dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800">
                   <span class="text-xs text-zinc-500 dark:text-zinc-400">
-                    Se descargará de forma automática al iniciar el primer túnel.
+                    {t('settings.cloudflared.auto_download_hint')}
                   </span>
                   <button
                     type="button"
@@ -1675,7 +1772,7 @@
                     class="px-3 py-1.5 bg-zinc-900 hover:bg-zinc-800 dark:bg-zinc-100 dark:hover:bg-zinc-200 text-white dark:text-zinc-900 rounded-lg text-xs font-medium transition-colors flex items-center gap-1.5 cursor-pointer disabled:opacity-50 shrink-0"
                   >
                     <Download class="w-3.5 h-3.5" />
-                    <span>Descargar ahora</span>
+                    <span>{t('settings.cloudflared.download_now')}</span>
                   </button>
                 </div>
               {/if}
@@ -1688,11 +1785,11 @@
                   <div class="flex items-center gap-2">
                     <FolderDown class="w-4 h-4 text-zinc-600 dark:text-zinc-400" />
                     <h3 class="text-xs font-semibold tracking-wider text-zinc-900 dark:text-zinc-100">
-                      Carpeta de Descargas
+                      {t('settings.download_dir.title')}
                     </h3>
                   </div>
                   <p class="text-xs text-zinc-500 dark:text-zinc-400 leading-relaxed">
-                    Ubicación en tu equipo donde se guardarán los archivos recibidos en el modo recibir.
+                    {t('settings.download_dir.desc')}
                   </p>
                 </div>
               </div>
@@ -1701,7 +1798,7 @@
                 <div class="flex items-center gap-2 min-w-0 flex-1">
                   <Folder class="w-4 h-4 text-zinc-400 shrink-0" />
                   <span class="text-[11px] leading-none font-mono text-zinc-700 dark:text-zinc-300 truncate" title={configState.downloadDir}>
-                    {configState.downloadDir || 'Descargas (por defecto)'}
+                    {configState.downloadDir || t('settings.download_dir.default')}
                   </span>
                 </div>
 
@@ -1710,17 +1807,17 @@
                     type="button"
                     onclick={handleSelectDownloadDir}
                     class="px-2.5 py-1.5 bg-zinc-900 hover:bg-zinc-800 dark:bg-zinc-100 dark:hover:bg-zinc-200 text-white dark:text-zinc-900 rounded-lg text-xs font-medium transition-colors flex items-center gap-1 cursor-pointer"
-                    title="Elegir otra carpeta de descargas"
+                    title={t('settings.download_dir.change_title')}
                   >
                     <FolderOpen class="w-3.5 h-3.5" />
-                    <span>Cambiar</span>
+                    <span>{t('settings.download_dir.change_btn')}</span>
                   </button>
 
                   <button
                     type="button"
                     onclick={handleOpenDownloadDir}
                     class="p-1.5 border border-zinc-200 dark:border-zinc-700 hover:bg-zinc-100 dark:hover:bg-zinc-800 text-zinc-600 dark:text-zinc-300 rounded-lg text-xs transition-colors cursor-pointer"
-                    title="Abrir carpeta en el explorador"
+                    title={t('settings.download_dir.open_title')}
                   >
                     <ExternalLink class="w-3.5 h-3.5" />
                   </button>
@@ -1740,11 +1837,11 @@
                   <div class="flex items-center gap-2">
                     <Globe class="w-4 h-4 text-zinc-600 dark:text-zinc-400" />
                     <h3 class="text-xs font-semibold tracking-wider text-zinc-900 dark:text-zinc-100">
-                      Dominio Propio
+                      {t('settings.custom_domain.title')}
                     </h3>
                   </div>
                   <p class="text-xs text-zinc-500 dark:text-zinc-400 leading-relaxed">
-                    Enruta las transferencias con tu propio dominio usando un Named Tunnel de Cloudflare Zero Trust.
+                    {t('settings.custom_domain.desc')}
                   </p>
                 </div>
 
@@ -1753,7 +1850,7 @@
                   <button
                     type="button"
                     role="switch"
-                    aria-label="Usar dominio propio"
+                    aria-label={t('settings.custom_domain.toggle_aria')}
                     aria-checked={configState.useCustomDomain}
                     onclick={() => {
                       configState.useCustomDomain = !configState.useCustomDomain;
@@ -1773,8 +1870,8 @@
                     type="button"
                     onclick={() => isCustomDomainExpanded = !isCustomDomainExpanded}
                     class="p-1 rounded-lg hover:bg-zinc-100 dark:hover:bg-zinc-800 text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200 transition-colors cursor-pointer"
-                    title={isCustomDomainExpanded ? "Colapsar configuración" : "Expandir configuración"}
-                    aria-label={isCustomDomainExpanded ? "Colapsar configuración" : "Expandir configuración"}
+                    title={isCustomDomainExpanded ? t('settings.custom_domain.collapse_title') : t('settings.custom_domain.expand_title')}
+                    aria-label={isCustomDomainExpanded ? t('settings.custom_domain.collapse_title') : t('settings.custom_domain.expand_title')}
                     aria-expanded={isCustomDomainExpanded}
                   >
                     <ChevronDown class="w-4 h-4 transform transition-transform duration-200 {isCustomDomainExpanded ? 'rotate-180' : 'rotate-0'}" />
@@ -1796,7 +1893,7 @@
                   <!-- Dominio Público Input -->
                   <div class="flex flex-col gap-1.5">
                     <label class="text-xs font-medium text-zinc-700 dark:text-zinc-300" for="custom-domain-input">
-                      Dominio público
+                      {t('settings.custom_domain.public_domain')}
                     </label>
                     <input
                       id="custom-domain-input"
@@ -1813,14 +1910,14 @@
                       class="bg-zinc-50 dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 rounded-lg px-3 py-2 text-xs font-mono text-zinc-800 dark:text-zinc-200 focus:outline-none focus:border-zinc-400 dark:focus:border-zinc-600 disabled:cursor-default transition-colors"
                     />
                     <span class="text-[11px] text-zinc-500">
-                      El dominio o subdominio asignado en Cloudflare Zero Trust (ej: <code class="font-mono">transfer.midominio.com</code>).
+                      {t('settings.custom_domain.public_domain_hint')}
                     </span>
                   </div>
 
                   <!-- Tunnel Token Input -->
                   <div class="flex flex-col gap-1.5">
                     <label class="text-xs font-medium text-zinc-700 dark:text-zinc-300" for="tunnel-token-input">
-                      Tunnel Token
+                      {t('settings.custom_domain.token')}
                     </label>
                     <div class="relative flex items-center">
                       <input
@@ -1838,8 +1935,8 @@
                         disabled={!configState.useCustomDomain}
                         onclick={() => showToken = !showToken}
                         class="absolute right-2.5 p-1 text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-300 cursor-pointer disabled:cursor-default"
-                        title={showToken ? 'Ocultar token' : 'Mostrar token'}
-                        aria-label={showToken ? 'Ocultar token' : 'Mostrar token'}
+                        title={showToken ? t('settings.custom_domain.token_hide') : t('settings.custom_domain.token_show')}
+                        aria-label={showToken ? t('settings.custom_domain.token_hide') : t('settings.custom_domain.token_show')}
                       >
                         {#if showToken}
                           <EyeOff class="w-3.5 h-3.5" />
@@ -1849,14 +1946,14 @@
                       </button>
                     </div>
                     <span class="text-[11px] text-zinc-500">
-                      Token provisto por Cloudflare al crear el túnel (<code class="font-mono">cloudflared tunnel run --token ...</code>).
+                      {t('settings.custom_domain.token_hint')}
                     </span>
                   </div>
 
                   <!-- Puerto Local Input -->
                   <div class="flex flex-col gap-1.5">
                     <label class="text-xs font-medium text-zinc-700 dark:text-zinc-300" for="fixed-port-input">
-                      Puerto local del servidor
+                      {t('settings.custom_domain.port')}
                     </label>
                     <div class="relative flex items-center w-36">
                       <input
@@ -1884,8 +1981,8 @@
                           ontouchstart={() => startPortStep(1)}
                           ontouchend={stopPortStep}
                           class="flex-1 flex items-center justify-center text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200 hover:bg-zinc-200/60 dark:hover:bg-zinc-800/60 transition-colors cursor-pointer select-none disabled:cursor-default"
-                          title="Aumentar puerto"
-                          aria-label="Aumentar puerto"
+                          title={t('settings.custom_domain.port_increase')}
+                          aria-label={t('settings.custom_domain.port_increase')}
                         >
                           <ChevronUp class="w-3 h-3 stroke-[2.5]" />
                         </button>
@@ -1899,15 +1996,15 @@
                           ontouchstart={() => startPortStep(-1)}
                           ontouchend={stopPortStep}
                           class="flex-1 flex items-center justify-center text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200 hover:bg-zinc-200/60 dark:hover:bg-zinc-800/60 transition-colors cursor-pointer select-none border-t border-zinc-100 dark:border-zinc-800/60 disabled:cursor-default"
-                          title="Disminuir puerto"
-                          aria-label="Disminuir puerto"
+                          title={t('settings.custom_domain.port_decrease')}
+                          aria-label={t('settings.custom_domain.port_decrease')}
                         >
                           <ChevronDown class="w-3 h-3 stroke-[2.5]" />
                         </button>
                       </div>
                     </div>
                     <span class="text-[11px] text-zinc-500">
-                      Puerto donde escucha la app. En Cloudflare debe apuntar a <code class="font-mono">http://localhost:{configState.fixedPort || 56789}</code>.
+                      {t('settings.custom_domain.port_hint', { port: String(configState.fixedPort || 56789) })}
                     </span>
                   </div>
                 </div>
@@ -1947,10 +2044,10 @@
                   <Upload class="w-7 h-7 sm:w-8 sm:h-8" />
                 </div>
                 <p class="text-sm font-medium text-zinc-800 dark:text-zinc-200 text-center leading-snug" style="margin-bottom: clamp(0.2rem, 0.8vh, 0.35rem);">
-                  Arrastra archivos aquí o haz clic para seleccionar
+                  {t('send.staging.empty_drop')}
                 </p>
                 <p class="text-xs text-zinc-500 dark:text-zinc-500 text-center leading-normal">
-                  Puedes seleccionar varios archivos a la vez
+                  {t('send.staging.empty_hint')}
                 </p>
               </div>
             </div>
@@ -1971,7 +2068,7 @@
                 style="padding-top: clamp(0.45rem, 1.4vh, 0.75rem); padding-bottom: clamp(0.45rem, 1.4vh, 0.75rem);"
               >
                 <span class="font-medium text-zinc-500 dark:text-zinc-400">
-                  {files.length} {files.length === 1 ? 'archivo preparado' : 'archivos preparados'}
+                  {files.length === 1 ? t('send.staging.file_ready') : t('send.staging.files_ready', { count: String(files.length) })}
                 </span>
                 <div class="flex items-center gap-3">
                   <button
@@ -1979,14 +2076,14 @@
                     class="text-zinc-600 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100 flex items-center gap-1 font-medium cursor-pointer"
                   >
                     <Plus class="w-3.5 h-3.5" />
-                    Agregar más
+                    {t('send.staging.add_more')}
                   </button>
                   <button
                     onclick={clearFiles}
                     class="text-zinc-400 hover:text-red-500 transition-colors flex items-center gap-1 cursor-pointer"
                   >
                     <Trash2 class="w-3.5 h-3.5" />
-                    Limpiar
+                    {t('send.staging.clear')}
                   </button>
                 </div>
               </div>
@@ -2018,7 +2115,7 @@
                       <!-- Drag Handle: compact, hidden but space preserved when only 1 file -->
                       <div
                         class="w-3.5 h-4 flex items-center justify-center shrink-0 self-center {files.length > 1 ? 'text-zinc-400 dark:text-zinc-600 hover:text-zinc-700 dark:hover:text-zinc-300 cursor-grab active:cursor-grabbing' : 'invisible pointer-events-none'}"
-                        title={files.length > 1 ? "Arrastra para reordenar" : ""}
+                        title={files.length > 1 ? t('send.staging.drag_reorder') : ""}
                       >
                         <GripVertical class="w-3.5 h-3.5" />
                       </div>
@@ -2031,7 +2128,7 @@
                     <button
                       onclick={() => removeFile(f.id)}
                       class="text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200 p-1 rounded cursor-pointer shrink-0"
-                      title="Quitar archivo"
+                      title={t('send.staging.remove_file')}
                     >
                       <X class="w-4 h-4" />
                     </button>
@@ -2053,10 +2150,10 @@
             >
               {#if isStarting}
                 <span class="animate-spin h-3.5 w-3.5 border-2 border-white/30 border-t-white dark:border-zinc-900/30 dark:border-t-zinc-900 rounded-full shrink-0"></span>
-                <span>Conectando...</span>
+                <span>{t('send.staging.connecting')}</span>
               {:else}
                 <CornerDownLeft class="w-4 h-4" />
-                <span>Compartir</span>
+                <span>{t('send.staging.share_btn')}</span>
               {/if}
             </button>
           </div>
@@ -2070,7 +2167,7 @@
               <div class="flex items-center gap-2">
                 <span class="h-2 w-2 rounded-full bg-emerald-500 animate-pulse"></span>
                 <span class="text-xs font-medium text-zinc-700 dark:text-zinc-300">
-                  Compartiendo {shareResult?.files.length} {shareResult?.files.length === 1 ? 'archivo' : 'archivos'}
+                  {shareResult?.files.length === 1 ? t('send.active.sharing_single') : t('send.active.sharing_multiple', { count: String(shareResult?.files.length ?? 0) })}
                 </span>
               </div>
 
@@ -2081,16 +2178,16 @@
                   onclick={handleAddMoreToActive}
                   disabled={isAddingMore || isStopping}
                   class="px-2.5 py-1 rounded-md text-xs font-medium text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 transition-colors cursor-pointer flex items-center gap-1 disabled:opacity-50 shrink-0"
-                  title="Agregar más archivos sin reiniciar el túnel"
+                  title={t('send.active.add_files')}
                 >
                   {#if isAddingMore}
                     <span class="animate-spin h-3 w-3 border-2 border-zinc-300 border-t-zinc-800 dark:border-zinc-600 dark:border-t-zinc-200 rounded-full shrink-0"></span>
-                    <span class="hidden md:inline">Añadiendo...</span>
-                    <span class="md:hidden">Añadiendo...</span>
+                    <span class="hidden md:inline">{t('send.active.adding')}</span>
+                    <span class="md:hidden">{t('send.active.adding')}</span>
                   {:else}
                     <Plus class="w-3.5 h-3.5 shrink-0" />
-                    <span class="hidden md:inline">Agregar archivos</span>
-                    <span class="md:hidden">Agregar</span>
+                    <span class="hidden md:inline">{t('send.active.add_files')}</span>
+                    <span class="md:hidden">{t('send.active.add_short')}</span>
                   {/if}
                 </button>
 
@@ -2101,9 +2198,9 @@
                 >
                   {#if isStopping}
                     <span class="animate-spin h-3 w-3 border-2 border-red-200 border-t-red-600 dark:border-red-900/60 dark:border-t-red-400 rounded-full shrink-0"></span>
-                    Deteniendo...
+                    {t('send.active.stopping')}
                   {:else}
-                    Detener
+                    {t('send.active.stop')}
                   {/if}
                 </button>
               </div>
@@ -2115,7 +2212,7 @@
               <div class="flex flex-col gap-2">
                 <div class="flex items-center justify-between gap-2.5 flex-wrap">
                   <div class="flex items-baseline text-xs text-zinc-500 dark:text-zinc-400 min-w-0 gap-1.5">
-                    <span class="shrink-0">Enlace directo para descargar</span>
+                    <span class="shrink-0">{t('send.active.single_link_label')}</span>
                     <strong class="text-zinc-800 dark:text-zinc-200 font-medium truncate min-w-0">{singleFile.name}</strong>
                     <span class="shrink-0 font-mono text-zinc-400 text-xs">({singleFile.size}):</span>
                   </div>
@@ -2124,24 +2221,24 @@
                       <button
                         onclick={() => shareLinkTarget = 'local'}
                         class="px-2 py-0.5 rounded-md transition-colors cursor-pointer flex items-center gap-1 {shareLinkTarget === 'local' ? 'bg-white dark:bg-zinc-900 text-emerald-600 dark:text-emerald-400 shadow-xs' : 'text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-200'}"
-                        title="Mostrar enlace y QR de Red Local"
+                        title={t('send.active.show_local_target')}
                       >
                         <EthernetPort class="w-3 h-3" />
-                        <span>Red Local</span>
+                        <span>{t('send.active.target_local')}</span>
                       </button>
                       <button
                         onclick={() => shareLinkTarget = 'internet'}
                         class="px-2 py-0.5 rounded-md transition-colors cursor-pointer flex items-center gap-1 {shareLinkTarget === 'internet' ? 'bg-white dark:bg-zinc-900 text-indigo-600 dark:text-indigo-400 shadow-xs' : 'text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-200'}"
-                        title="Mostrar enlace y QR de Internet"
+                        title={t('send.active.show_internet_target')}
                       >
                         <Globe class="w-3 h-3" />
-                        <span>Internet</span>
+                        <span>{t('send.active.target_internet')}</span>
                       </button>
                     </div>
                   {:else if shareResult?.networkMode === 'lan_only'}
                     <span class="text-[10px] font-medium px-1.5 py-0.5 rounded bg-emerald-50 dark:bg-emerald-950/30 text-emerald-600 dark:text-emerald-400 border border-emerald-200 dark:border-emerald-800/50 flex items-center gap-1 shrink-0 ml-auto sm:ml-0">
                       <EthernetPort class="w-3 h-3" />
-                      <span>Red Local</span>
+                      <span>{t('send.active.target_local')}</span>
                     </span>
                   {/if}
                 </div>
@@ -2158,16 +2255,16 @@
                   >
                     {#if copiedMap[singleFile.id]}
                       <Check class="w-3.5 h-3.5" />
-                      Copiado
+                      {t('send.active.copied')}
                     {:else}
                       <Copy class="w-3.5 h-3.5" />
-                      Copiar
+                      {t('send.active.copy')}
                     {/if}
                   </button>
                   <button
                     onclick={() => openQR(singleFile.name, singleFile.directUrl, singleFile.localUrl)}
                     class="p-2 border border-zinc-200 dark:border-zinc-800 hover:bg-zinc-100 dark:hover:bg-zinc-800 text-zinc-600 dark:text-zinc-400 rounded-lg transition-colors cursor-pointer shrink-0"
-                    title="Código QR"
+                    title={t('send.active.qr_code')}
                   >
                     <QrCode class="w-4 h-4" />
                   </button>
@@ -2180,31 +2277,31 @@
                 <div class="flex flex-col gap-2">
                   <div class="flex items-center justify-between gap-2.5 flex-wrap">
                     <span class="text-xs text-zinc-500 dark:text-zinc-400">
-                      Enlace general para descargar todos los archivos:
+                      {t('send.active.bundle_link_label')}
                     </span>
                     {#if shareResult?.networkMode === 'both' && (shareResult?.bundleUrl || (shareResult?.files && shareResult.files[0]?.directUrl))}
                       <div class="flex items-center p-0.5 bg-zinc-100 dark:bg-zinc-800/80 rounded-lg text-xs font-medium shrink-0 ml-auto sm:ml-0">
                         <button
                           onclick={() => shareLinkTarget = 'local'}
                           class="px-2 py-0.5 rounded-md transition-colors cursor-pointer flex items-center gap-1 {shareLinkTarget === 'local' ? 'bg-white dark:bg-zinc-900 text-emerald-600 dark:text-emerald-400 shadow-xs' : 'text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-200'}"
-                          title="Mostrar enlaces y QR de Red Local"
+                          title={t('send.active.show_local_target')}
                         >
                           <EthernetPort class="w-3 h-3" />
-                          <span>Red Local</span>
+                          <span>{t('send.active.target_local')}</span>
                         </button>
                         <button
                           onclick={() => shareLinkTarget = 'internet'}
                           class="px-2 py-0.5 rounded-md transition-colors cursor-pointer flex items-center gap-1 {shareLinkTarget === 'internet' ? 'bg-white dark:bg-zinc-900 text-indigo-600 dark:text-indigo-400 shadow-xs' : 'text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-200'}"
-                          title="Mostrar enlaces y QR de Internet"
+                          title={t('send.active.show_internet_target')}
                         >
                           <Globe class="w-3 h-3" />
-                          <span>Internet</span>
+                          <span>{t('send.active.target_internet')}</span>
                         </button>
                       </div>
                     {:else if shareResult?.networkMode === 'lan_only'}
                       <span class="text-[10px] font-medium px-1.5 py-0.5 rounded bg-emerald-50 dark:bg-emerald-950/30 text-emerald-600 dark:text-emerald-400 border border-emerald-200 dark:border-emerald-800/50 flex items-center gap-1 shrink-0 ml-auto sm:ml-0">
                         <EthernetPort class="w-3 h-3" />
-                        <span>Red Local</span>
+                        <span>{t('send.active.target_local')}</span>
                       </span>
                     {/if}
                   </div>
@@ -2212,7 +2309,7 @@
                     <div class="p-3 flex items-center justify-between gap-3 text-xs">
                       <div class="min-w-0 flex-1">
                         <div class="flex items-baseline gap-1.5 min-w-0 mb-0.5">
-                          <span class="font-medium text-zinc-900 dark:text-zinc-100 truncate min-w-0">Todos los archivos</span>
+                          <span class="font-medium text-zinc-900 dark:text-zinc-100 truncate min-w-0">{t('send.active.all_files')}</span>
                           <span class="font-normal font-mono text-zinc-400 text-xs shrink-0">({totalBundleSize})</span>
                         </div>
                         <div class="font-mono text-zinc-400 text-[11px] truncate">{formatDisplayUrl(getActiveBundleUrl())}</div>
@@ -2224,16 +2321,16 @@
                         >
                           {#if copiedMap['bundle']}
                             <Check class="w-3 h-3" />
-                            Copiado
+                            {t('send.active.copied')}
                           {:else}
                             <Copy class="w-3 h-3" />
-                            Copiar
+                            {t('send.active.copy')}
                           {/if}
                         </button>
                         <button
-                          onclick={() => openQR('Todos los archivos', shareResult?.bundleUrl || '', shareResult?.localBundleUrl || '')}
+                          onclick={() => openQR(t('send.active.all_files'), shareResult?.bundleUrl || '', shareResult?.localBundleUrl || '')}
                           class="p-1.5 border border-zinc-200 dark:border-zinc-700 hover:bg-zinc-200 dark:hover:bg-zinc-800 text-zinc-600 dark:text-zinc-400 rounded transition-colors cursor-pointer"
-                          title="Código QR"
+                          title={t('send.active.qr_code')}
                         >
                           <QrCode class="w-3.5 h-3.5" />
                         </button>
@@ -2261,11 +2358,11 @@
                     aria-expanded={isIndividualLinksExpanded}
                   >
                     <div class="flex items-baseline gap-1.5">
-                      <span>Enlaces directos por archivo</span>
+                      <span>{t('send.active.individual_links')}</span>
                       <span class="text-xs text-zinc-400 dark:text-zinc-500">({shareResult?.files.length ?? 0})</span>
                     </div>
                     <div class="flex items-center gap-1 text-zinc-400 group-hover:text-zinc-600 dark:group-hover:text-zinc-300 transition-colors">
-                      <span class="text-[11px] font-normal">{isIndividualLinksExpanded ? 'Ocultar' : 'Mostrar'}</span>
+                      <span class="text-[11px] font-normal">{isIndividualLinksExpanded ? t('send.active.hide') : t('send.active.show')}</span>
                       <ChevronDown class="w-3.5 h-3.5 transform transition-transform duration-250 ease-out {isIndividualLinksExpanded ? 'rotate-180' : 'rotate-0'}" />
                     </div>
                   </button>
@@ -2297,23 +2394,23 @@
                                 >
                                   {#if copiedMap[f.id]}
                                     <Check class="w-3 h-3" />
-                                    Copiado
+                                    {t('send.active.copied')}
                                   {:else}
                                     <Copy class="w-3 h-3" />
-                                    Copiar
+                                    {t('send.active.copy')}
                                   {/if}
                                 </button>
                                 <button
                                   onclick={() => openQR(f.name, f.directUrl, f.localUrl)}
                                   class="p-1.5 border border-zinc-200 dark:border-zinc-700 hover:bg-zinc-200 dark:hover:bg-zinc-800 text-zinc-600 dark:text-zinc-400 rounded transition-colors cursor-pointer"
-                                  title="Código QR"
+                                  title={t('send.active.qr_code')}
                                 >
                                   <QrCode class="w-3.5 h-3.5" />
                                 </button>
                                 <button
                                   onclick={() => promptRemoveFile(f.id, f.name)}
                                   class="text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200 p-1 rounded cursor-pointer shrink-0"
-                                  title="Quitar archivo"
+                                  title={t('send.active.remove_from_share')}
                                 >
                                   <X class="w-4 h-4" />
                                 </button>
@@ -2332,15 +2429,15 @@
           <!-- Transfers Table -->
           <div class="border border-zinc-200 dark:border-zinc-800 rounded-xl bg-white dark:bg-zinc-900/40 overflow-hidden flex flex-col shrink-0 shadow-xs">
             <div class="px-4 py-3 border-b border-zinc-200 dark:border-zinc-800 flex items-baseline justify-between text-xs font-medium">
-              <span class="text-zinc-500 dark:text-zinc-400">Descargas activas</span>
+              <span class="text-zinc-500 dark:text-zinc-400">{t('send.active.downloads_table_title')}</span>
               <div class="flex items-baseline gap-2.5 text-zinc-700 dark:text-zinc-300 shrink-0">
                 <div class="flex items-baseline gap-1.5">
-                  <span class="text-zinc-400 dark:text-zinc-500 font-normal">Subida:</span>
+                  <span class="text-zinc-400 dark:text-zinc-500 font-normal">{t('send.active.speed_upload')}</span>
                   <span class="font-mono font-medium tabular-nums min-w-[3.75rem]">{formatSpeed(stats.totalSpeed)}</span>
                 </div>
                 <span class="text-zinc-300 dark:text-zinc-700 select-none font-normal">·</span>
                 <div class="flex items-baseline gap-1.5">
-                  <span class="text-zinc-400 dark:text-zinc-500 font-normal">Total:</span>
+                  <span class="text-zinc-400 dark:text-zinc-500 font-normal">{t('send.active.speed_total')}</span>
                   <span class="font-mono font-medium tabular-nums min-w-[3.25rem]">{formatBytes(stats.totalBytesSent)}</span>
                 </div>
               </div>
@@ -2348,38 +2445,38 @@
 
             {#if stats.transfers.length === 0}
               <div class="py-12 text-center text-xs text-zinc-400 dark:text-zinc-500">
-                Esperando a que algún invitado inicie la descarga...
+                {t('send.active.waiting_guests')}
               </div>
             {:else}
               <div class="divide-y divide-zinc-100 dark:divide-zinc-800/60">
-                {#each stats.transfers as t (t.id)}
-                  {@const DeviceIcon = getDeviceIcon(t.device)}
+                {#each stats.transfers as transfer (transfer.id)}
+                  {@const DeviceIcon = getDeviceIcon(transfer.device)}
                   <div class="p-4 flex flex-col gap-2.5">
                     <div class="flex items-baseline justify-between gap-3 text-xs">
                       <div class="flex items-baseline gap-2 min-w-0 flex-1">
                         <DeviceIcon class="w-4 h-4 text-zinc-400 shrink-0 self-center" />
-                        <span class="font-medium text-zinc-900 dark:text-zinc-100 truncate min-w-0 shrink" title={t.fileName}>{t.fileName}</span>
+                        <span class="font-medium text-zinc-900 dark:text-zinc-100 truncate min-w-0 shrink" title={transfer.fileName}>{transfer.fileName}</span>
                         <span class="text-zinc-400 text-xs font-mono inline-flex items-baseline min-w-0 shrink-[4]">
                           <span class="shrink-0">(</span>
-                          <span class="truncate min-w-0 shrink-[4]" title={t.device}>{t.device}</span>
+                          <span class="truncate min-w-0 shrink-[4]" title={transfer.device}>{transfer.device}</span>
                           <span class="shrink-0 mx-1">·</span>
-                          <span class="truncate min-w-0 shrink" title={t.ip}>{t.ip}</span>
+                          <span class="truncate min-w-0 shrink" title={transfer.ip}>{transfer.ip}</span>
                           <span class="shrink-0">)</span>
                         </span>
                       </div>
 
                       <div class="flex items-baseline gap-2.5 shrink-0 text-xs font-mono">
-                        {#if t.status === 'downloading'}
-                          <span class="text-emerald-600 dark:text-emerald-400 font-medium tabular-nums w-16 text-right">{formatSpeed(t.speed)}</span>
-                          <span class="text-zinc-500 tabular-nums w-8 text-right">{t.progress.toFixed(0)}%</span>
-                        {:else if t.status === 'completed'}
-                          <span class="text-emerald-500 font-medium font-sans text-right">Completado</span>
-                        {:else if t.status === 'cancelled'}
-                          <span class="text-red-500/90 dark:text-red-400 font-medium font-sans text-right">Cancelado</span>
-                          <span class="text-zinc-400 text-[11px] tabular-nums w-8 text-right">{t.progress.toFixed(0)}%</span>
+                        {#if transfer.status === 'downloading'}
+                          <span class="text-emerald-600 dark:text-emerald-400 font-medium tabular-nums w-16 text-right">{formatSpeed(transfer.speed)}</span>
+                          <span class="text-zinc-500 tabular-nums w-8 text-right">{transfer.progress.toFixed(0)}%</span>
+                        {:else if transfer.status === 'completed'}
+                          <span class="text-emerald-500 font-medium font-sans text-right">{t('send.active.status_completed')}</span>
+                        {:else if transfer.status === 'cancelled'}
+                          <span class="text-red-500/90 dark:text-red-400 font-medium font-sans text-right">{t('send.active.status_cancelled')}</span>
+                          <span class="text-zinc-400 text-[11px] tabular-nums w-8 text-right">{transfer.progress.toFixed(0)}%</span>
                         {:else}
-                          <span class="text-amber-500/90 dark:text-amber-400 font-medium font-sans text-right">Pausado</span>
-                          <span class="text-zinc-400 text-[11px] tabular-nums w-8 text-right">{t.progress.toFixed(0)}%</span>
+                          <span class="text-amber-500/90 dark:text-amber-400 font-medium font-sans text-right">{t('send.active.status_paused')}</span>
+                          <span class="text-zinc-400 text-[11px] tabular-nums w-8 text-right">{transfer.progress.toFixed(0)}%</span>
                         {/if}
                       </div>
                     </div>
@@ -2388,15 +2485,15 @@
                     <div class="w-full h-1.5 bg-zinc-100 dark:bg-zinc-800 rounded-full overflow-hidden">
                       <div
                         class="h-full transition-all duration-300 rounded-full {
-                          t.status === 'completed'
+                          transfer.status === 'completed'
                             ? 'bg-emerald-500'
-                            : t.status === 'cancelled'
+                            : transfer.status === 'cancelled'
                             ? 'bg-red-400/60 dark:bg-red-500/50'
-                            : t.status === 'paused'
+                            : transfer.status === 'paused'
                             ? 'bg-amber-400/70 dark:bg-amber-500/60'
                             : 'bg-zinc-900 dark:bg-zinc-100'
                         }"
-                        style="width: {t.progress}%"
+                        style="width: {transfer.progress}%"
                       ></div>
                     </div>
                   </div>
@@ -2425,13 +2522,13 @@
                   <span class="animate-spin h-7 w-7 sm:h-8 sm:w-8 border-2 border-zinc-300 border-t-zinc-900 dark:border-zinc-700 dark:border-t-zinc-100 rounded-full shrink-0"></span>
                 </div>
                 <p class="text-sm font-medium text-zinc-800 dark:text-zinc-200 text-center leading-snug" style="margin-bottom: clamp(0.2rem, 0.8vh, 0.35rem);">
-                  Iniciando receptor de archivos...
+                  {t('receive.loading.title')}
                 </p>
                 <p class="text-xs text-zinc-500 dark:text-zinc-400 text-center leading-normal">
                   {#if configState.networkMode === 'lan_only'}
-                    Iniciando receptor en la red local
+                    {t('receive.loading.lan_hint')}
                   {:else}
-                    Generando enlace público y código QR con Cloudflare
+                    {t('receive.loading.cloud_hint')}
                   {/if}
                 </p>
               </div>
@@ -2446,7 +2543,7 @@
                 style="padding-top: clamp(0.4rem, 1.2vh, 0.625rem); padding-bottom: clamp(0.4rem, 1.2vh, 0.625rem);"
               >
                 <CornerDownLeft class="w-4 h-4" />
-                <span>Compartir</span>
+                <span>{t('send.staging.share_btn')}</span>
               </button>
             </div>
           {:else if isReceiving && receiveResult}
@@ -2459,7 +2556,7 @@
                   <div class="flex items-center gap-2">
                     <span class="h-2 w-2 rounded-full bg-emerald-500 animate-pulse"></span>
                     <span class="text-xs font-semibold text-zinc-800 dark:text-zinc-200">
-                      Listo para recibir archivos
+                      {t('receive.ready.title')}
                     </span>
                   </div>
 
@@ -2470,9 +2567,9 @@
                   >
                     {#if isStoppingReceive}
                       <span class="animate-spin h-3 w-3 border-2 border-red-200 border-t-red-600 dark:border-red-900/60 dark:border-t-red-400 rounded-full shrink-0"></span>
-                      <span>Deteniendo...</span>
+                      <span>{t('receive.ready.stopping')}</span>
                     {:else}
-                      <span>Detener</span>
+                      <span>{t('receive.ready.stop')}</span>
                     {/if}
                   </button>
                 </div>
@@ -2483,9 +2580,9 @@
                   <div class="shrink-0 flex flex-col items-center">
                     <button
                       type="button"
-                      onclick={() => openQR('Cargar archivos', receiveResult?.uploadUrl || '', receiveResult?.localUploadUrl || '')}
+                      onclick={() => openQR(t('receive.ready.upload_files'), receiveResult?.uploadUrl || '', receiveResult?.localUploadUrl || '')}
                       class="bg-white dark:bg-zinc-950 p-2 rounded-xl border border-zinc-200 dark:border-zinc-800 shadow-xs cursor-pointer hover:border-zinc-400 dark:hover:border-zinc-600 transition-colors flex items-center justify-center text-zinc-950 dark:text-zinc-50"
-                      title="Ampliar código QR"
+                      title={t('receive.ready.enlarge_qr')}
                     >
                       {#if receiveQrSvg}
                         <div class="w-28 h-28 sm:w-32 sm:h-32 flex items-center justify-center">
@@ -2500,14 +2597,14 @@
                         type="button"
                         onclick={toggleReceiveQrTarget}
                         class="mt-2 w-56 justify-center px-2.5 py-1 text-xs font-medium rounded-lg border border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-950 hover:bg-zinc-100 dark:hover:bg-zinc-900 text-zinc-700 dark:text-zinc-300 transition-colors flex items-center gap-1.5 cursor-pointer shadow-2xs whitespace-nowrap"
-                        title={receiveQrTarget === 'internet' ? 'Cambiar a QR Red Local' : 'Cambiar a QR Internet'}
+                        title={receiveQrTarget === 'internet' ? t('receive.ready.switch_to_local_qr') : t('receive.ready.switch_to_internet_qr')}
                       >
                         {#if receiveQrTarget === 'internet'}
                           <EthernetPort class="w-3.5 h-3.5 text-emerald-500" />
-                          <span>Cambiar a QR Red Local</span>
+                          <span>{t('receive.ready.switch_to_local_qr')}</span>
                         {:else}
                           <Globe class="w-3.5 h-3.5 text-indigo-500" />
-                          <span>Cambiar a QR Internet</span>
+                          <span>{t('receive.ready.switch_to_internet_qr')}</span>
                         {/if}
                       </button>
                     {/if}
@@ -2517,10 +2614,10 @@
                   <div class="flex-1 flex flex-col gap-2.5 min-w-0 w-full">
                     <div class="flex flex-col gap-0.5">
                       <span class="text-xs font-medium text-zinc-800 dark:text-zinc-200">
-                        Enlace para subir archivos:
+                        {t('receive.ready.upload_link_label')}
                       </span>
                       <p class="text-[11px] text-zinc-500 dark:text-zinc-400">
-                        Escanea el QR o abre este link en tu teléfono o navegador:
+                        {t('receive.ready.upload_link_hint')}
                       </p>
                     </div>
 
@@ -2537,10 +2634,10 @@
                       >
                         {#if copiedMap['receive_url']}
                           <Check class="w-3.5 h-3.5" />
-                          <span>Copiado</span>
+                          <span>{t('receive.ready.copied')}</span>
                         {:else}
                           <Copy class="w-3.5 h-3.5" />
-                          <span>Copiar</span>
+                          <span>{t('receive.ready.copy')}</span>
                         {/if}
                       </button>
                     </div>
@@ -2550,7 +2647,7 @@
                       <div class="flex items-center gap-1.5 min-w-0 flex-1 text-zinc-600 dark:text-zinc-400">
                         <Folder class="w-3.5 h-3.5 shrink-0 text-zinc-400" />
                         <span class="truncate leading-none" title={receiveResult.downloadDir}>
-                          Guardando en: <strong class="text-zinc-800 dark:text-zinc-200 font-mono font-medium">{receiveResult.downloadDir}</strong>
+                          {t('receive.ready.saving_in')} <strong class="text-zinc-800 dark:text-zinc-200 font-mono font-medium">{receiveResult.downloadDir}</strong>
                         </span>
                       </div>
                       <div class="flex items-center shrink-0">
@@ -2558,9 +2655,9 @@
                           type="button"
                           onclick={handleSelectDownloadDir}
                           class="px-2 py-0.5 rounded text-[11px] font-medium text-zinc-700 dark:text-zinc-300 hover:bg-zinc-200 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
-                          title="Cambiar carpeta de descarga"
+                          title={t('receive.ready.change_dir_title')}
                         >
-                          Cambiar
+                          {t('receive.ready.change_dir')}
                         </button>
                       </div>
                     </div>
@@ -2572,7 +2669,7 @@
               {#if Object.keys(activeUploads).length > 0}
                 <div class="border border-zinc-200 dark:border-zinc-800 rounded-xl bg-white dark:bg-zinc-900/40 p-3.5 flex flex-col gap-2 shrink-0 shadow-xs">
                   <div class="text-xs font-semibold text-zinc-800 dark:text-zinc-200">
-                    Recibiendo en este momento:
+                    {t('receive.ready.receiving_now')}
                   </div>
                   <div class="divide-y divide-zinc-100 dark:divide-zinc-800/60">
                     {#each Object.values(activeUploads) as upload (upload.id)}
@@ -2599,13 +2696,13 @@
               <div class="border border-zinc-200 dark:border-zinc-800 rounded-xl bg-white dark:bg-zinc-900/40 overflow-hidden flex flex-col shrink-0 shadow-xs">
                 <div class="px-4 py-2.5 border-b border-zinc-200 dark:border-zinc-800 flex items-center justify-between text-xs">
                   <span class="font-medium text-zinc-500 dark:text-zinc-400">
-                    Archivos recibidos en esta sesión ({receivedFiles.length})
+                    {t('receive.ready.received_files_title', { count: String(receivedFiles.length) })}
                   </span>
                 </div>
 
                 {#if receivedFiles.length === 0}
                   <div class="py-8 text-center text-xs text-zinc-400 dark:text-zinc-500">
-                    Aún no se han recibido archivos. Los archivos cargados desde el enlace se guardarán automáticamente en tu carpeta de descargas.
+                    {t('receive.ready.no_files_yet')}
                   </div>
                 {:else}
                   <div class="divide-y divide-zinc-100 dark:divide-zinc-800/60 max-h-[220px] overflow-y-auto">
@@ -2627,15 +2724,15 @@
                               type="button"
                               onclick={() => handleOpenFile(rf)}
                               class="px-2.5 py-1 bg-zinc-100 dark:bg-zinc-800 hover:bg-zinc-200 dark:hover:bg-zinc-700 text-zinc-800 dark:text-zinc-200 rounded text-xs font-medium transition-colors cursor-pointer"
-                              title="Abrir archivo"
+                              title={t('receive.ready.open_file')}
                             >
-                              Abrir
+                              {t('receive.ready.open_file')}
                             </button>
                             <button
                               type="button"
                               onclick={() => handleShowFileInFolder(rf)}
                               class="p-1 text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200 rounded transition-colors cursor-pointer"
-                              title="Mostrar en carpeta"
+                              title={t('receive.ready.show_in_folder')}
                             >
                               <FolderOpen class="w-3.5 h-3.5" />
                             </button>
@@ -2668,10 +2765,10 @@
                   <Download class="w-7 h-7 sm:w-8 sm:h-8" />
                 </div>
                 <p class="text-sm font-medium text-zinc-800 dark:text-zinc-200 text-center leading-snug" style="margin-bottom: clamp(0.2rem, 0.8vh, 0.35rem);">
-                  Recepción inactiva
+                  {t('receive.inactive.title')}
                 </p>
                 <p class="text-xs text-zinc-500 dark:text-zinc-400 text-center leading-normal">
-                  Inicia el receptor para generar un enlace y código QR donde otros dispositivos puedan enviarte archivos.
+                  {t('receive.inactive.desc')}
                 </p>
               </div>
             </div>
@@ -2685,7 +2782,7 @@
                 style="padding-top: clamp(0.4rem, 1.2vh, 0.625rem); padding-bottom: clamp(0.4rem, 1.2vh, 0.625rem);"
               >
                 <CornerDownLeft class="w-4 h-4" />
-                <span>Iniciar</span>
+                <span>{t('receive.inactive.start')}</span>
               </button>
             </div>
           {/if}
@@ -2701,7 +2798,7 @@
       <div
         role="dialog"
         aria-modal="true"
-        aria-label="Código QR"
+        aria-label={t('modal.qr.title')}
         tabindex="-1"
         onclick={(e) => {
           if (e.target === e.currentTarget) {
@@ -2721,20 +2818,20 @@
               {#if qrModal.activeTarget === 'local'}
                 <span class="text-[10px] font-medium px-1.5 py-0.5 rounded bg-emerald-50 dark:bg-emerald-950/30 text-emerald-600 dark:text-emerald-400 border border-emerald-200 dark:border-emerald-800/50 flex items-center gap-1 shrink-0">
                   <EthernetPort class="w-3 h-3" />
-                  <span>Red Local</span>
+                  <span>{t('modal.qr.target_local')}</span>
                 </span>
               {:else}
                 <span class="text-[10px] font-medium px-1.5 py-0.5 rounded bg-indigo-50 dark:bg-indigo-950/30 text-indigo-600 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-800/50 flex items-center gap-1 shrink-0">
                   <Globe class="w-3 h-3" />
-                  <span>Internet</span>
+                  <span>{t('modal.qr.target_internet')}</span>
                 </span>
               {/if}
             </div>
             <button
               onclick={() => qrModal.show = false}
               class="text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-200 cursor-pointer p-1 rounded-md shrink-0 transition-colors"
-              title="Cerrar"
-              aria-label="Cerrar"
+              title={t('modal.qr.close')}
+              aria-label={t('modal.qr.close')}
             >
               <X class="w-4 h-4" />
             </button>
@@ -2763,14 +2860,14 @@
                 type="button"
                 onclick={toggleModalQrTarget}
                 class="mt-3 w-56 justify-center px-3 py-1.5 text-xs font-medium rounded-lg border border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-900 hover:bg-zinc-100 dark:hover:bg-zinc-800 text-zinc-700 dark:text-zinc-300 transition-colors flex items-center gap-1.5 cursor-pointer shadow-xs whitespace-nowrap shrink-0"
-                title={qrModal.activeTarget === 'internet' ? 'Cambiar a QR Red Local' : 'Cambiar a QR Internet'}
+                title={qrModal.activeTarget === 'internet' ? t('modal.qr.switch_to_local') : t('modal.qr.switch_to_internet')}
               >
                 {#if qrModal.activeTarget === 'internet'}
                   <EthernetPort class="w-3.5 h-3.5 text-emerald-500" />
-                  <span>Cambiar a QR Red Local</span>
+                  <span>{t('modal.qr.switch_to_local')}</span>
                 {:else}
                   <Globe class="w-3.5 h-3.5 text-indigo-500" />
-                  <span>Cambiar a QR Internet</span>
+                  <span>{t('modal.qr.switch_to_internet')}</span>
                 {/if}
               </button>
             {/if}
@@ -2786,7 +2883,7 @@
       <div
         role="dialog"
         aria-modal="true"
-        aria-label="Confirmar eliminación"
+        aria-label={t('modal.delete.title')}
         tabindex="-1"
         onclick={(e) => {
           if (e.target === e.currentTarget && !isDeleting) {
@@ -2805,17 +2902,17 @@
             </div>
             <div class="min-w-0 flex-1">
               <h3 class="text-sm font-semibold text-zinc-900 dark:text-zinc-100 mb-1">
-                ¿Eliminar archivo de la sesión?
+                {t('modal.delete.title')}
               </h3>
               <p class="text-xs text-zinc-500 dark:text-zinc-400 leading-relaxed">
-                El archivo <span class="font-medium text-zinc-800 dark:text-zinc-200 break-all">"{deleteModal.fileName}"</span> dejará de estar disponible para su descarga.
+                {t('modal.delete.desc', { name: deleteModal.fileName })}
               </p>
             </div>
           </div>
 
           <div class="p-2.5 rounded-lg bg-red-50/70 dark:bg-red-950/30 border border-red-200/60 dark:border-red-900/30 flex items-start gap-2 text-[11px] text-red-600 dark:text-red-400">
             <AlertCircle class="w-4 h-4 shrink-0 mt-0.5" />
-            <span>Si algún usuario está descargando este archivo, su descarga se cancelará.</span>
+            <span>{t('modal.delete.warning')}</span>
           </div>
 
           <div class="flex items-center justify-end gap-2 pt-1">
@@ -2824,7 +2921,7 @@
               disabled={isDeleting}
               class="px-3.5 py-1.5 border border-zinc-200 dark:border-zinc-700 hover:bg-zinc-100 dark:hover:bg-zinc-800 text-zinc-700 dark:text-zinc-300 font-medium rounded-lg text-xs transition-colors cursor-pointer disabled:opacity-50"
             >
-              Cancelar
+              {t('modal.delete.cancel')}
             </button>
             <button
               onclick={handleConfirmDelete}
@@ -2833,10 +2930,10 @@
             >
               {#if isDeleting}
                 <span class="animate-spin h-3.5 w-3.5 border-2 border-white/30 border-t-white rounded-full shrink-0"></span>
-                <span>Eliminando...</span>
+                <span>{t('modal.delete.deleting')}</span>
               {:else}
                 <Trash2 class="w-3.5 h-3.5" />
-                <span>Eliminar</span>
+                <span>{t('modal.delete.confirm')}</span>
               {/if}
             </button>
           </div>
@@ -2851,7 +2948,7 @@
       <div
         role="dialog"
         aria-modal="true"
-        aria-label="Descargando Cloudflared"
+        aria-label={t('modal.cloudflared.title')}
         tabindex="-1"
         class="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4 z-50 select-none overflow-hidden"
       >
@@ -2865,10 +2962,10 @@
             </div>
             <div class="min-w-0 flex-1">
               <h3 class="text-sm font-semibold text-zinc-900 dark:text-zinc-100 mb-1">
-                Descargando Cloudflare Tunnel
+                {t('modal.cloudflared.title')}
               </h3>
               <p class="text-xs text-zinc-500 dark:text-zinc-400 leading-relaxed">
-                Requerido para generar el túnel público. Solo se descarga la primera vez.
+                {t('modal.cloudflared.desc')}
               </p>
             </div>
           </div>
@@ -2907,7 +3004,7 @@
               onclick={handleCancelCloudflaredDownload}
               class="px-3.5 py-1.5 border border-zinc-200 dark:border-zinc-700 hover:bg-zinc-100 dark:hover:bg-zinc-800 text-zinc-700 dark:text-zinc-300 font-medium rounded-lg text-xs transition-colors cursor-pointer"
             >
-              Cancelar
+              {t('modal.cloudflared.cancel')}
             </button>
           </div>
         </div>

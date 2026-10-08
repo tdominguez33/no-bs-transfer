@@ -9,6 +9,12 @@ import (
 	"sync"
 )
 
+// Language constants
+const (
+	LanguageEN = "en"
+	LanguageES = "es"
+)
+
 // Network mode constants
 const (
 	NetworkModeBoth    = "both"     // Red local + Internet
@@ -17,6 +23,7 @@ const (
 
 // AppConfig stores user preferences and custom domain tunnel settings
 type AppConfig struct {
+	Language        string `json:"language,omitempty"`
 	NetworkMode     string `json:"networkMode"`
 	UseCustomDomain bool   `json:"useCustomDomain"`
 	CustomDomain    string `json:"customDomain"`
@@ -204,6 +211,7 @@ func Load() *AppConfig {
 
 	defaultAppData := GetAppDataConfigPath()
 	cfg := &AppConfig{
+		Language:        LanguageEN,
 		NetworkMode:     NetworkModeBoth,
 		UseCustomDomain: false,
 		CustomDomain:    "",
@@ -223,6 +231,9 @@ func Load() *AppConfig {
 			if err := json.Unmarshal(data, cfg); err == nil {
 				cfg.SavePortable = true
 				cfg.CustomDomain = CleanDomainHost(cfg.CustomDomain)
+				if cfg.Language != LanguageES && cfg.Language != LanguageEN {
+					cfg.Language = LanguageEN
+				}
 				if cfg.NetworkMode != NetworkModeLANOnly && cfg.NetworkMode != NetworkModeBoth {
 					cfg.NetworkMode = NetworkModeBoth
 				}
@@ -255,6 +266,9 @@ func Load() *AppConfig {
 		if err := json.Unmarshal(data, cfg); err == nil {
 			cfg.SavePortable = false
 			cfg.CustomDomain = CleanDomainHost(cfg.CustomDomain)
+			if cfg.Language != LanguageES && cfg.Language != LanguageEN {
+				cfg.Language = LanguageEN
+			}
 			if cfg.NetworkMode != NetworkModeLANOnly && cfg.NetworkMode != NetworkModeBoth {
 				cfg.NetworkMode = NetworkModeBoth
 			}
@@ -281,6 +295,10 @@ func Load() *AppConfig {
 func Save(cfg *AppConfig) error {
 	configMu.Lock()
 	defer configMu.Unlock()
+
+	if cfg.Language != LanguageES && cfg.Language != LanguageEN {
+		cfg.Language = LanguageEN
+	}
 
 	// Clean domain: strip protocol, paths, and trailing slashes so it's always stored without https://
 	cfg.CustomDomain = CleanDomainHost(cfg.CustomDomain)

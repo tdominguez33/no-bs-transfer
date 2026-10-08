@@ -1,6 +1,7 @@
 export namespace config {
 	
 	export class AppConfig {
+	    language?: string;
 	    networkMode: string;
 	    useCustomDomain: boolean;
 	    customDomain: string;
@@ -17,6 +18,7 @@ export namespace config {
 	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.language = source["language"];
 	        this.networkMode = source["networkMode"];
 	        this.useCustomDomain = source["useCustomDomain"];
 	        this.customDomain = source["customDomain"];
