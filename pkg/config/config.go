@@ -18,8 +18,8 @@ const (
 
 // Network mode constants
 const (
-	NetworkModeBoth    = "both"     // Red local + Internet
-	NetworkModeLANOnly = "lan_only" // Solo red local
+	NetworkModeBoth    = "both"     // Local network + Internet
+	NetworkModeLANOnly = "lan_only" // Local network only
 )
 
 // AppConfig stores user preferences and custom domain tunnel settings

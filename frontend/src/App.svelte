@@ -563,7 +563,7 @@
     if (isCheckingConnection) return;
     isCheckingConnection = true;
     const startTime = Date.now();
-    const minDurationMs = 600; // Duración mínima visual para que la carga se aprecie suave sin flicker
+    const minDurationMs = 600; // Minimum visual duration to ensure smooth loading without flicker
 
     let hasNet = false;
     try {
@@ -966,7 +966,7 @@
       }
     }
 
-    // Pre-flight check: si está en modo internet, verificar conexión activa antes de arrancar
+    // Pre-flight check: if in internet mode, verify active connection before starting
     if (configState.networkMode === 'both') {
       isStarting = true;
       try {
@@ -1073,7 +1073,7 @@
       }
     }
 
-    // Pre-flight check: si está en modo internet, verificar conexión activa antes de arrancar
+    // Pre-flight check: if in internet mode, verify active connection before starting
     if (configState.networkMode === 'both') {
       isStartingReceive = true;
       try {

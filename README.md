@@ -1,81 +1,86 @@
 # no-bs-transfer
 
-Una aplicación de escritorio ligera, ultra rápida y sin límites para transferir archivos locales a cualquier dispositivo a través de **Túneles de Cloudflare**.
+A lightweight, ultra-fast desktop application designed to solve the friction of transferring files between devices without size limits, third-party cloud uploads, or account logins. By leveraging **Cloudflare Tunnels**, it creates instant, secure end-to-end HTTPS links directly to your machine without opening ports or configuring your router.
 
 ---
 
-## Características
+## Features
 
-- **Sin límite de tamaño:** Transmite archivos de 1 GB, 50 GB o varios TB. Memoria RAM constante $O(1)$ gracias a streaming directo disco-a-socket.
-- **Túneles Cloudflare automáticos:** Genera enlaces seguros HTTPS (`https://*.trycloudflare.com`) sin abrir puertos en tu router ni registrar dominios.
-- **Monitoreo en vivo de invitados:**
-  - Lista de dispositivos conectados en tiempo real (iPhone, Android, Windows, Mac, Linux, curl).
-  - Porcentaje de descarga (0% a 100%) y bytes transferidos.
-  - Velocidad individual y velocidad total de subida en MB/s.
-  - Estados: Descargando, Pausado, Completado.
-- **Código QR instantáneo:** Escanea con la cámara de cualquier teléfono para descargar sin instalar ninguna app.
-- **Reanudación de descargas:** Soporte nativo para cabeceras HTTP `Accept-Ranges: bytes` (permite pausar y reanudar descargas).
-- **Modo portable:** Puedes transformar la aplicación en completamente **portable** colocando un archivo vacío llamado `portable.txt` junto al ejecutable.
-- **Consumo mínimo de recursos:** Pesa solo **~13 MB** y consume **~50 MB de RAM**.
+- **No size limit:** Stream files of 1 GB, 50 GB, or multiple TBs. Constant $O(1)$ RAM usage thanks to direct disk-to-socket streaming.
+- **Two-way transfers (Send & Receive):** Share files with direct links or let guests upload photos, videos, and documents straight to your PC from any browser.
+- **Automatic Cloudflare Tunnels:** Generates secure HTTPS links (`https://*.trycloudflare.com`) without opening router ports or registering domain names.
+- **Custom domains & named tunnels:** Support for personal domains (e.g., `transfer.yourdomain.com`) and Cloudflare Tunnel tokens with configurable port binding.
+- **Local Network (LAN) mode:** Transfer at full speed completely offline with zero internet dependency.
+- **Live guest monitoring:**
+  - Real-time list of connected devices (iPhone, Android, Windows, Mac, Linux, curl).
+  - Download and upload progress (0% to 100%) and transferred bytes.
+  - Individual client speeds and total aggregate speed in MB/s.
+  - States: Downloading, Uploading, Paused, Completed.
+- **Instant QR code:** Scan with any smartphone camera to download or upload without installing any app.
+- **Download resumption:** Native support for HTTP `Accept-Ranges: bytes` headers (allows pausing and resuming downloads).
+- **Portable mode:** Make the app completely **portable** by placing an empty file named `portable.txt` next to the executable.
+- **Minimal resource consumption:** Weighs only **~13 MB** and consumes **~50 MB of RAM**.
 
 ---
 
-## Stack Tecnológico
+## Tech Stack
 
 - **Backend:** Go (Golang)
-- **GUI:** Wails v2 (WebView2 nativo de Windows)
+- **GUI:** Wails v2 (Windows WebView2 native)
 - **Frontend:** Svelte 5 + TypeScript + Vite + Tailwind CSS + `@lucide/svelte` + `qrcode`
-- **Túnel:** Cloudflare Tunnel CLI (`cloudflared`)
+- **Tunnel:** Cloudflare Tunnel CLI (`cloudflared`)
 
 ---
 
-## Cómo ejecutar la aplicación
+## How to Run the Application
 
-### Modo desarrollo (con recarga en caliente / Hot-Reload):
+### Download (Pre-built Executable)
+Download the latest standalone binary directly from [GitHub Releases](https://github.com/tdominguez33/no-bs-transfer/releases)—no installation needed, just run the executable.
+
+### Run from Source
+
+#### Development mode (with Hot-Reload):
 ```powershell
 wails dev
 ```
 
-### Compilar para producción:
+#### Build for production:
 ```powershell
 wails build
 ```
 
 ---
 
-## Flags para Desarrollo y Pruebas
+## Extra Flags
 
-Para facilitar el testing local y probar el flujo completo con el binario descargado (ignorando instalaciones previas en tu máquina), puedes utilizar el flag de desarrollo:
+### Ignore local system installation (`--ignore-local-install`)
+Ignores any pre-installed `cloudflared` binary on the system (`PATH`, `Program Files`, `WinGet`, etc.) or next to the executable, and searches **only** inside the AppData folder (`%LOCALAPPDATA%\no-bs-transfer\bin\cloudflared.exe`):
 
-### Ignorar instalación local del sistema (`--ignore-local-install`)
-Ignora cualquier instalación previa en el sistema (`PATH`, `Program Files`, `WinGet`, etc.) o junto al ejecutable, y busca **únicamente** en la carpeta de AppData (`%LOCALAPPDATA%\no-bs-transfer\bin\cloudflared.exe`):
+- **If missing in AppData:** The app automatically downloads `cloudflared` directly into the AppData folder.
+- **If already downloaded:** Uses the binary located in that folder.
 
-* **Si no existe en AppData:** La app se comportará como en una PC limpia, permitiéndote probar la descarga automática y la barra de progreso desde cero.
-* **Si ya se descargó:** Utilizará el binario ubicado en dicha carpeta.
-
-#### Cómo usarlo:
-* **Con variable de entorno en PowerShell:**
+#### How to use:
+- **With environment variable in PowerShell:**
   ```powershell
   $env:NO_BS_IGNORE_LOCAL_INSTALL="1"; wails dev
   ```
-* **O pasando el argumento CLI al ejecutable:**
+- **Or passing the CLI argument to the executable:**
   ```powershell
   .\build\bin\no-bs-transfer.exe --ignore-local-install
   ```
 
-### Forzar protocolo HTTP/2 (`--force-http2`)
-Fuerza a `cloudflared` a conectarse a Cloudflare utilizando **HTTP/2 sobre TCP (puerto 443)** en lugar del protocolo por defecto **QUIC (UDP)**, evitando esperar el tiempo de reintento/fallback automático:
+### Force HTTP/2 protocol (`--force-http2`)
+Forces `cloudflared` to connect to Cloudflare using **HTTP/2 over TCP (port 443)** instead of the default **QUIC (UDP)** protocol, eliminating timeout and fallback delays:
 
-* **Ideal para redes corporativas:** La gran mayoría de firewalls o proxies empresariales bloquean el tráfico UDP en puertos no estándar. Con este flag, la app establece el túnel directamente mediante HTTPS estándar.
-* **Compatible:** Aplica tanto a túneles automáticos rápidos (`trycloudflare.com`) como a túneles con Token y Dominio personalizado.
+- **Bypasses restrictive firewalls:** Ideal for corporate or restricted networks where non-standard UDP traffic is blocked, establishing the tunnel directly via standard HTTPS.
+- **Compatible:** Applies to both automatic quick tunnels (`trycloudflare.com`) and named tunnels with custom tokens and domains.
 
-#### Cómo usarlo:
-* **Con variable de entorno en PowerShell:**
+#### How to use:
+- **With environment variable in PowerShell:**
   ```powershell
   $env:NO_BS_FORCE_HTTP2="1"; wails dev
   ```
-* **O pasando el argumento CLI al ejecutable:**
+- **Or passing the CLI argument to the executable:**
   ```powershell
   .\build\bin\no-bs-transfer.exe --force-http2
   ```
-
