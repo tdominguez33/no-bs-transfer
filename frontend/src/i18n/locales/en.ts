@@ -174,5 +174,31 @@ export const en = {
   'error.download_cloudflared': 'Error downloading cloudflared',
   'error.download_tunnel_component': 'Failed to download tunnel component: {err}',
   'error.dropped_files': 'Error processing dropped files',
-  'error.cloudflared_status': 'Error checking cloudflared status:'
+  'error.dropped_folders_ignored': 'Folders cannot be shared directly and were skipped.',
+  'error.tunnel_unexpected_exit': 'The Cloudflare tunnel disconnected unexpectedly.',
+  'error.cloudflared_status': 'Error checking cloudflared status:',
+  'device.browser': 'Browser',
+  'receive.uploading.error': 'Upload error',
+  'receive.uploading.stalled': 'Sender not responding',
+  'receive.uploading.cancelled': 'Upload cancelled',
+
+  // Standardized Backend Error Codes
+  'error.code.ERR_NO_INTERNET': 'No internet connection, mode unavailable',
+  'error.code.ERR_INVALID_TUNNEL_TOKEN': 'Invalid Cloudflare Tunnel token. Check your Custom Domain settings.',
+  'error.code.ERR_TUNNEL_RATE_LIMITED': 'Cloudflare reached the temporary connection limit. Wait a few seconds and try again.',
+  'error.code.ERR_PORT_IN_USE': 'The configured local port is already in use by another application.',
+  'error.code.ERR_CLOUDFLARED_NOT_FOUND': 'Tunnel component (cloudflared) was not found. Download it from Settings.',
+  'error.code.ERR_TUNNEL_TIMEOUT': 'Timed out while connecting to Cloudflare. Check your internet connection.',
+  'error.code.ERR_CUSTOM_DOMAIN_TUNNEL_FAILED': 'Could not start the custom domain tunnel. Verify the token and domain in Settings.',
+  'error.code.ERR_TUNNEL_FAILED': 'Could not establish the Cloudflare tunnel. Check your connection or switch to Local Network mode.',
+  'error.code.ERR_DOWNLOAD_CANCELLED': 'Download cancelled',
+  'error.code.ERR_CLOUDFLARED_DOWNLOAD_FAILED': 'Could not download cloudflared. Check your internet connection.',
+  'error.code.ERR_NO_FILES_TO_SHARE': 'No files selected to share.',
+  'error.code.ERR_SERVER_START_FAILED': 'Failed to start the local transfer server.',
+  'error.code.ERR_RECEIVE_SERVER_START_FAILED': 'Failed to start the local receive server.',
+  'error.code.ERR_NO_ACTIVE_SESSION': 'There is no active transfer session.',
+  'error.code.ERR_INVALID_NETWORK_MODE': 'Invalid network mode selected.',
+  'error.code.ERR_DOWNLOAD_DIR_ACCESS': 'Could not access or create the selected downloads folder.',
+  'error.code.ERR_FILE_NOT_FOUND': 'The file was moved or deleted.'
 };
+

@@ -22,9 +22,22 @@ import (
 	wailsRuntime "github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
+const (
+	ErrDownloadCancelled         = "ERR_DOWNLOAD_CANCELLED"
+	ErrCloudflaredDownloadFailed = "ERR_CLOUDFLARED_DOWNLOAD_FAILED"
+	ErrNoFilesToShare            = "ERR_NO_FILES_TO_SHARE"
+	ErrServerStartFailed         = "ERR_SERVER_START_FAILED"
+	ErrReceiveServerStartFailed  = "ERR_RECEIVE_SERVER_START_FAILED"
+	ErrNoActiveSession           = "ERR_NO_ACTIVE_SESSION"
+	ErrInvalidNetworkMode        = "ERR_INVALID_NETWORK_MODE"
+	ErrDownloadDirAccess         = "ERR_DOWNLOAD_DIR_ACCESS"
+	ErrFileNotFound              = "ERR_FILE_NOT_FOUND"
+)
+
 // FileShareItem represents an individual file with its direct download link
 type FileShareItem struct {
 	ID        string `json:"id"`
+	Path      string `json:"path"`
 	Name      string `json:"name"`
 	Size      string `json:"size"`
 	DirectURL string `json:"directUrl"`
@@ -75,9 +88,27 @@ type App struct {
 
 // NewApp creates a new App application struct
 func NewApp() *App {
-	return &App{
-		tunnelManager: tunnel.NewManager(),
+	tm := tunnel.NewManager()
+	app := &App{
+		tunnelManager: tm,
 	}
+	tm.SetOnUnexpectedExit(func() {
+		app.mu.Lock()
+		wasSharing := app.server != nil
+		wasReceiving := app.receiveServer != nil
+		app.mu.Unlock()
+
+		if wasSharing {
+			_ = app.StopShare()
+		}
+		if wasReceiving {
+			_ = app.StopReceive()
+		}
+		if app.ctx != nil && (wasSharing || wasReceiving) {
+			wailsRuntime.EventsEmit(app.ctx, "tunnel_unexpected_exit", tunnel.ErrTunnelFailed)
+		}
+	})
+	return app
 }
 
 func (a *App) startup(ctx context.Context) {
@@ -90,8 +121,8 @@ func (a *App) beforeClose(ctx context.Context) bool {
 }
 
 func (a *App) shutdown(ctx context.Context) {
-	a.StopShare()
-	a.StopReceive()
+	_ = a.StopShare()
+	_ = a.StopReceive()
 }
 
 // SaveWindowDimensions saves current window width and height to config
@@ -182,17 +213,17 @@ func (a *App) EnsureCloudflared() (string, error) {
 	})
 
 	if err != nil {
-		errMsg := err.Error()
+		errCode := ErrCloudflaredDownloadFailed
 		if errors.Is(err, context.Canceled) {
-			errMsg = "Descarga cancelada"
+			errCode = ErrDownloadCancelled
 		}
 		if a.ctx != nil {
 			wailsRuntime.EventsEmit(a.ctx, "cloudflared_download_progress", tunnel.DownloadProgress{
 				Done:  true,
-				Error: errMsg,
+				Error: errCode,
 			})
 		}
-		return "", fmt.Errorf("error al descargar cloudflared: %w", err)
+		return "", errors.New(errCode)
 	}
 
 	return path, nil
@@ -274,6 +305,19 @@ func generate6DigitCode(existing map[string]bool) string {
 	}
 }
 
+func mapServerBindError(err error, fallbackCode string) error {
+	if err == nil {
+		return nil
+	}
+	lower := strings.ToLower(err.Error())
+	if strings.Contains(lower, "address already in use") ||
+		strings.Contains(lower, "only one usage of each socket address") ||
+		strings.Contains(lower, "bind:") {
+		return errors.New(tunnel.ErrPortInUse)
+	}
+	return errors.New(fallbackCode)
+}
+
 // StartShare initiates the local server and optionally Cloudflare tunnel for multiple files
 func (a *App) StartShare(files []*transfer.SharedFile) (*MultiShareResult, error) {
 	seenPaths := make(map[string]bool)
@@ -285,7 +329,7 @@ func (a *App) StartShare(files []*transfer.SharedFile) (*MultiShareResult, error
 		}
 	}
 	if len(uniqueFiles) == 0 {
-		return nil, fmt.Errorf("no hay archivos para compartir")
+		return nil, errors.New(ErrNoFilesToShare)
 	}
 	files = uniqueFiles
 
@@ -298,7 +342,7 @@ func (a *App) StartShare(files []*transfer.SharedFile) (*MultiShareResult, error
 	// 1. Ensure internet connection & cloudflared are ready only if we need Internet tunnel
 	if networkMode == config.NetworkModeBoth {
 		if !tunnel.CheckInternet() {
-			return nil, fmt.Errorf("No hay conexión a internet, modo no disponible")
+			return nil, errors.New(tunnel.ErrNoInternet)
 		}
 		if _, err := a.EnsureCloudflared(); err != nil {
 			return nil, tunnel.FormatTunnelError(err, false)
@@ -328,9 +372,9 @@ func (a *App) StartShare(files []*transfer.SharedFile) (*MultiShareResult, error
 	}
 	a.activeFiles = files
 
-	// Check config for custom domain & fixed port
+	// Only bind FixedPort when Internet tunnel with custom domain is active
 	port := 0
-	if cfg.UseCustomDomain && cfg.FixedPort > 0 {
+	if networkMode == config.NetworkModeBoth && cfg.UseCustomDomain && cfg.FixedPort > 0 {
 		port = cfg.FixedPort
 	}
 
@@ -341,7 +385,7 @@ func (a *App) StartShare(files []*transfer.SharedFile) (*MultiShareResult, error
 		}
 	})
 	if err != nil {
-		return nil, fmt.Errorf("fallo al iniciar servidor de transferencia: %w", err)
+		return nil, mapServerBindError(err, ErrServerStartFailed)
 	}
 	a.server = srv
 
@@ -380,6 +424,7 @@ func (a *App) StartShare(files []*transfer.SharedFile) (*MultiShareResult, error
 
 		fileItems = append(fileItems, FileShareItem{
 			ID:        f.ID,
+			Path:      f.Path,
 			Name:      f.Name,
 			Size:      f.Size,
 			DirectURL: directURL,
@@ -414,7 +459,7 @@ func (a *App) AddFilesToShare(newFiles []*transfer.SharedFile) (*MultiShareResul
 	defer a.mu.Unlock()
 
 	if a.server == nil {
-		return nil, fmt.Errorf("no hay sesión activa")
+		return nil, errors.New(ErrNoActiveSession)
 	}
 
 	if a.usedCodes == nil {
@@ -467,6 +512,7 @@ func (a *App) AddFilesToShare(newFiles []*transfer.SharedFile) (*MultiShareResul
 
 		fileItems = append(fileItems, FileShareItem{
 			ID:        f.ID,
+			Path:      f.Path,
 			Name:      f.Name,
 			Size:      f.Size,
 			DirectURL: directURL,
@@ -496,7 +542,7 @@ func (a *App) RemoveFileFromShare(fileID string) (*MultiShareResult, error) {
 	defer a.mu.Unlock()
 
 	if a.server == nil {
-		return nil, fmt.Errorf("no hay sesión activa")
+		return nil, errors.New(ErrNoActiveSession)
 	}
 
 	// 1. Remove from server (cancels active downloads and removes tracker stats)
@@ -557,6 +603,7 @@ func (a *App) RemoveFileFromShare(fileID string) (*MultiShareResult, error) {
 
 		fileItems = append(fileItems, FileShareItem{
 			ID:        f.ID,
+			Path:      f.Path,
 			Name:      f.Name,
 			Size:      f.Size,
 			DirectURL: directURL,
@@ -582,6 +629,9 @@ func (a *App) RemoveFileFromShare(fileID string) (*MultiShareResult, error) {
 
 // StopShare terminates the active sharing session
 func (a *App) StopShare() error {
+	// Abort any in-flight tunnel startup before acquiring a.mu
+	a.tunnelManager.Abort()
+
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
@@ -621,12 +671,32 @@ func formatBytes(b int64) string {
 	return fmt.Sprintf("%.2f %cB", float64(b)/float64(div), "KMGTPE"[exp])
 }
 
+func detectOutboundIPv4() string {
+	conn, err := net.DialTimeout("udp4", "8.8.8.8:80", 100*time.Millisecond)
+	if err != nil {
+		return ""
+	}
+	defer conn.Close()
+	if udpAddr, ok := conn.LocalAddr().(*net.UDPAddr); ok && udpAddr.IP != nil {
+		if ip4 := udpAddr.IP.To4(); ip4 != nil && ip4.IsPrivate() && !ip4.IsLinkLocalUnicast() {
+			return ip4.String()
+		}
+	}
+	return ""
+}
+
 func getLocalIPs(port int) []string {
+	var preferred []string
 	var prioritized []string
 	var secondary []string
 
+	outboundIP := detectOutboundIPv4()
+
 	ifaces, err := net.Interfaces()
 	if err != nil {
+		if outboundIP != "" {
+			return []string{fmt.Sprintf("http://%s:%d", outboundIP, port)}
+		}
 		return []string{fmt.Sprintf("http://127.0.0.1:%d", port)}
 	}
 
@@ -675,8 +745,13 @@ func getLocalIPs(port int) []string {
 
 			// Only private IPs
 			if ip4.IsPrivate() {
-				url := fmt.Sprintf("http://%s:%d", ip4.String(), port)
-				if isVirtual {
+				ipStr := ip4.String()
+				url := fmt.Sprintf("http://%s:%d", ipStr, port)
+				// VirtualBox default Host-Only subnet is 192.168.56.x
+				isVBoxSubnet := strings.HasPrefix(ipStr, "192.168.56.")
+				if outboundIP != "" && ipStr == outboundIP && !isVirtual && !isVBoxSubnet {
+					preferred = append(preferred, url)
+				} else if isVirtual || isVBoxSubnet {
 					secondary = append(secondary, url)
 				} else {
 					prioritized = append(prioritized, url)
@@ -685,7 +760,8 @@ func getLocalIPs(port int) []string {
 		}
 	}
 
-	results := append(prioritized, secondary...)
+	results := append(preferred, prioritized...)
+	results = append(results, secondary...)
 	if len(results) == 0 {
 		return []string{fmt.Sprintf("http://127.0.0.1:%d", port)}
 	}
@@ -711,7 +787,7 @@ func (a *App) StartReceive() (*ReceiveResult, error) {
 	// 1. Ensure internet connection & cloudflared are ready only if we need Internet tunnel
 	if networkMode == config.NetworkModeBoth {
 		if !tunnel.CheckInternet() {
-			return nil, fmt.Errorf("No hay conexión a internet, modo no disponible")
+			return nil, errors.New(tunnel.ErrNoInternet)
 		}
 		if _, err := a.EnsureCloudflared(); err != nil {
 			return nil, tunnel.FormatTunnelError(err, false)
@@ -733,9 +809,9 @@ func (a *App) StartReceive() (*ReceiveResult, error) {
 	a.isReceiving = false
 	a.tunnelManager.Stop()
 
-	// Check config for custom domain & fixed port
+	// Only bind FixedPort when Internet tunnel with custom domain is active
 	port := 0
-	if cfg.UseCustomDomain && cfg.FixedPort > 0 {
+	if networkMode == config.NetworkModeBoth && cfg.UseCustomDomain && cfg.FixedPort > 0 {
 		port = cfg.FixedPort
 	}
 	downloadDir := config.GetEffectiveDownloadDir(cfg)
@@ -754,7 +830,7 @@ func (a *App) StartReceive() (*ReceiveResult, error) {
 		},
 	})
 	if err != nil {
-		return nil, fmt.Errorf("fallo al iniciar servidor de recepción: %w", err)
+		return nil, mapServerBindError(err, ErrReceiveServerStartFailed)
 	}
 	a.receiveServer = rcv
 
@@ -801,7 +877,7 @@ func (a *App) StartReceive() (*ReceiveResult, error) {
 // SetNetworkMode updates the network mode ("both" or "lan_only") in configuration
 func (a *App) SetNetworkMode(mode string) error {
 	if mode != config.NetworkModeBoth && mode != config.NetworkModeLANOnly {
-		return fmt.Errorf("modo de red no válido: %s", mode)
+		return errors.New(ErrInvalidNetworkMode)
 	}
 	cfg := config.Load()
 	cfg.NetworkMode = mode
@@ -819,6 +895,9 @@ func (a *App) GetNetworkMode() string {
 
 // StopReceive terminates the active receive session
 func (a *App) StopReceive() error {
+	// Abort any in-flight tunnel startup before acquiring a.mu
+	a.tunnelManager.Abort()
+
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
@@ -850,7 +929,7 @@ func (a *App) SetDownloadDir(dir string) error {
 		dir = config.DefaultDownloadDir()
 	}
 	if err := os.MkdirAll(dir, 0755); err != nil {
-		return fmt.Errorf("no se pudo acceder a la carpeta: %w", err)
+		return errors.New(ErrDownloadDirAccess)
 	}
 
 	cfg := config.Load()
@@ -892,56 +971,57 @@ func (a *App) SelectDownloadDir() (string, error) {
 	return chosen, nil
 }
 
+func startDetachedCmd(cmd *exec.Cmd) error {
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	go func() {
+		_ = cmd.Wait()
+	}()
+	return nil
+}
+
 // OpenDownloadDir opens the current download folder in the system file manager
 func (a *App) OpenDownloadDir() error {
 	dir := a.GetDownloadDir()
 	_ = os.MkdirAll(dir, 0755)
 
 	if runtime.GOOS == "windows" {
-		cmd := exec.Command("explorer", filepath.Clean(dir))
-		return cmd.Start()
+		return startDetachedCmd(exec.Command("explorer", filepath.Clean(dir)))
 	} else if runtime.GOOS == "darwin" {
-		cmd := exec.Command("open", dir)
-		return cmd.Start()
+		return startDetachedCmd(exec.Command("open", dir))
 	}
-	cmd := exec.Command("xdg-open", dir)
-	return cmd.Start()
+	return startDetachedCmd(exec.Command("xdg-open", dir))
 }
 
 // OpenFile opens a file with the system default program
 func (a *App) OpenFile(filePath string) error {
 	filePath = filepath.Clean(filePath)
 	if _, err := os.Stat(filePath); err != nil {
-		return fmt.Errorf("archivo no encontrado: %w", err)
+		return errors.New(ErrFileNotFound)
 	}
 
 	if runtime.GOOS == "windows" {
-		cmd := exec.Command("cmd", "/c", "start", "", filePath)
-		return cmd.Start()
+		return startDetachedCmd(exec.Command("rundll32.exe", "url.dll,FileProtocolHandler", filePath))
 	} else if runtime.GOOS == "darwin" {
-		cmd := exec.Command("open", filePath)
-		return cmd.Start()
+		return startDetachedCmd(exec.Command("open", filePath))
 	}
-	cmd := exec.Command("xdg-open", filePath)
-	return cmd.Start()
+	return startDetachedCmd(exec.Command("xdg-open", filePath))
 }
 
 // ShowFileInFolder opens the system file manager and selects/highlights the file
 func (a *App) ShowFileInFolder(filePath string) error {
 	filePath = filepath.Clean(filePath)
 	if _, err := os.Stat(filePath); err != nil {
-		return fmt.Errorf("archivo no encontrado: %w", err)
+		return errors.New(ErrFileNotFound)
 	}
 
 	if runtime.GOOS == "windows" {
-		cmd := exec.Command("explorer", fmt.Sprintf("/select,%s", filePath))
-		return cmd.Start()
+		return startDetachedCmd(exec.Command("explorer", fmt.Sprintf("/select,%s", filePath)))
 	} else if runtime.GOOS == "darwin" {
-		cmd := exec.Command("open", "-R", filePath)
-		return cmd.Start()
+		return startDetachedCmd(exec.Command("open", "-R", filePath))
 	}
 	dir := filepath.Dir(filePath)
-	cmd := exec.Command("xdg-open", dir)
-	return cmd.Start()
+	return startDetachedCmd(exec.Command("xdg-open", dir))
 }
 

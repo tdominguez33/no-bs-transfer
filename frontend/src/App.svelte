@@ -221,6 +221,25 @@
     speed: 0
   });
 
+  function getRawErrorCode(err: unknown): string {
+    if (typeof err === 'string') return err.trim();
+    if (err && typeof err === 'object' && 'message' in err && typeof (err as any).message === 'string') {
+      return (err as any).message.trim();
+    }
+    return '';
+  }
+
+  function resolveBackendError(err: unknown, fallbackKey: any): string {
+    const raw = getRawErrorCode(err);
+    if (!raw) return t(fallbackKey);
+    const codeKey = `error.code.${raw}` as any;
+    const translated = t(codeKey);
+    if (translated && translated !== codeKey) {
+      return translated;
+    }
+    return raw;
+  }
+
   async function refreshCloudflaredStatus() {
     try {
       const res = await GetCloudflaredStatus();
@@ -239,7 +258,9 @@
       await DownloadCloudflared();
       await refreshCloudflaredStatus();
     } catch (err: any) {
-      errorMessage = err?.message || t('error.download_cloudflared');
+      if (getRawErrorCode(err) !== 'ERR_DOWNLOAD_CANCELLED') {
+        errorMessage = resolveBackendError(err, 'error.download_cloudflared');
+      }
     } finally {
       isDownloadingCloudflared = false;
       cloudflaredDownloadProgress.show = false;
@@ -622,7 +643,7 @@
       await SaveConfig(toSave);
       lastSavedConfigJSON = currentJSON;
     } catch (err: any) {
-      errorMessage = err?.message || t('error.save_config');
+      errorMessage = resolveBackendError(err, 'error.save_config');
     }
   }
 
@@ -683,6 +704,7 @@
 
     OnFileDrop(async (x: number, y: number, paths: string[]) => {
       isDragging = false;
+      if (activeMode !== 'send' || showConfig) return;
       if (paths && paths.length > 0) {
         try {
           const loaded = await LoadFilesFromPaths(paths);
@@ -692,9 +714,11 @@
             } else {
               addFiles(loaded);
             }
+          } else {
+            errorMessage = t('error.dropped_folders_ignored');
           }
         } catch (err: any) {
-          errorMessage = err?.message || t('error.dropped_files');
+          errorMessage = resolveBackendError(err, 'error.dropped_files');
         }
       }
     }, false);
@@ -709,14 +733,24 @@
       isIndividualLinksExpanded = false;
     });
 
+    EventsOn('tunnel_unexpected_exit', (errCode: string) => {
+      errorMessage = resolveBackendError(errCode, 'error.tunnel_unexpected_exit');
+    });
+
     EventsOn('receive_file_progress', (p: ReceiveProgress) => {
+      if (p.status === 'completed') {
+        const copy = { ...activeUploads };
+        delete copy[p.id];
+        activeUploads = copy;
+        return;
+      }
       activeUploads[p.id] = p;
-      if (p.status === 'completed' || p.status === 'error') {
+      if (p.status === 'error' || p.status === 'cancelled') {
         setTimeout(() => {
           const copy = { ...activeUploads };
           delete copy[p.id];
           activeUploads = copy;
-        }, 1200);
+        }, 3000);
       }
     });
 
@@ -729,14 +763,16 @@
       receiveResult = null;
       receiveQrSvg = '';
       receiveQrDataUrl = '';
+      activeUploads = {};
     });
 
     refreshCloudflaredStatus();
 
     EventsOn('cloudflared_download_progress', (p: { downloaded: number; total: number; percent: number; speed: number; done: boolean; error?: string }) => {
       if (p.error) {
-        if (!p.error.toLowerCase().includes('cancel')) {
-          errorMessage = t('error.download_tunnel_component', { err: p.error });
+        if (p.error !== 'ERR_DOWNLOAD_CANCELLED' && !p.error.toLowerCase().includes('cancel')) {
+          const translatedErr = resolveBackendError(p.error, 'error.download_cloudflared');
+          errorMessage = t('error.download_tunnel_component', { err: translatedErr });
         }
         cloudflaredDownloadProgress.show = false;
         isDownloadingCloudflared = false;
@@ -773,6 +809,7 @@
     OnFileDropOff();
     EventsOff('transfer_update');
     EventsOff('share_stopped');
+    EventsOff('tunnel_unexpected_exit');
     EventsOff('receive_file_progress');
     EventsOff('receive_file_completed');
     EventsOff('receive_stopped');
@@ -785,8 +822,26 @@
     window.removeEventListener('offline', handleOfflineEvent);
     Object.values(itemWarningTimers).forEach(t => clearTimeout(t));
     itemWarningTimers = {};
+    Object.values(copyFeedbackTimers).forEach(t => clearTimeout(t));
+    copyFeedbackTimers = {};
     if (offlineTooltipTimer) clearTimeout(offlineTooltipTimer);
   });
+
+  function syncFilesWithResult(result: main.MultiShareResult | null) {
+    if (!result || !result.files) return;
+    const idByPath = new Map<string, string>();
+    const idByName = new Map<string, string>();
+    for (const item of result.files) {
+      if ((item as any).path) {
+        idByPath.set((item as any).path, item.id);
+      }
+      idByName.set(item.name, item.id);
+    }
+    files = files.map(f => {
+      const matchedId = idByPath.get(f.path) || idByName.get(f.name);
+      return matchedId ? { ...f, id: matchedId } : f;
+    });
+  }
 
   function addFiles(newFiles: transfer.SharedFile[]) {
     const existingPaths = new Set(files.map(f => f.path));
@@ -916,7 +971,7 @@
         addFiles(selected);
       }
     } catch (err: any) {
-      errorMessage = err?.message || t('error.select_files');
+      errorMessage = resolveBackendError(err, 'error.select_files');
     }
   }
 
@@ -929,7 +984,7 @@
         await handleAddFilesToActiveShare(selected);
       }
     } catch (err: any) {
-      errorMessage = err?.message || t('error.select_more_files');
+      errorMessage = resolveBackendError(err, 'error.select_more_files');
     }
   }
 
@@ -946,9 +1001,10 @@
       if (updatedResult) {
         shareResult = updatedResult;
         addFiles(toAdd);
+        syncFilesWithResult(updatedResult);
       }
     } catch (err: any) {
-      errorMessage = err?.message || t('error.add_to_share');
+      errorMessage = resolveBackendError(err, 'error.add_to_share');
     } finally {
       isAddingMore = false;
     }
@@ -966,44 +1022,19 @@
       }
     }
 
-    // Pre-flight check: if in internet mode, verify active connection before starting
-    if (configState.networkMode === 'both') {
-      isStarting = true;
-      try {
-        const hasInternet = await CheckInternetAccess();
-        if (!hasInternet) {
-          isStarting = false;
-          updateOnlineStatus(false);
-          await handleNetworkModeChange('lan_only');
-          errorMessage = t('error.no_internet_mode');
-          return;
-        }
-      } catch {
-        isStarting = false;
-        updateOnlineStatus(false);
-        await handleNetworkModeChange('lan_only');
-        errorMessage = t('error.no_internet_mode');
-        return;
-      }
-    }
-
     isStarting = true;
 
     try {
       const result = await StartShare(files);
       shareResult = result;
+      syncFilesWithResult(result);
       isSharing = true;
       shareLinkTarget = result.networkMode === 'lan_only' ? 'local' : 'internet';
       isIndividualLinksExpanded = false;
     } catch (err: any) {
-      const msg = err?.message || t('error.start_share');
-      errorMessage = msg;
-      if (
-        msg.includes('No hay conexión a internet') ||
-        msg.includes('modo no disponible') ||
-        msg.includes('no disponible') ||
-        msg.toLowerCase().includes('no internet')
-      ) {
+      const rawCode = getRawErrorCode(err);
+      errorMessage = resolveBackendError(err, 'error.start_share');
+      if (rawCode === 'ERR_NO_INTERNET') {
         updateOnlineStatus(false);
         await handleNetworkModeChange('lan_only');
       }
@@ -1024,7 +1055,7 @@
       isIndividualLinksExpanded = false;
       stats = { totalSpeed: 0, totalBytesSent: 0, activeGuests: 0, transfers: [] };
     } catch (err: any) {
-      errorMessage = err?.message || t('error.stop_share');
+      errorMessage = resolveBackendError(err, 'error.stop_share');
     } finally {
       isStopping = false;
     }
@@ -1073,27 +1104,6 @@
       }
     }
 
-    // Pre-flight check: if in internet mode, verify active connection before starting
-    if (configState.networkMode === 'both') {
-      isStartingReceive = true;
-      try {
-        const hasInternet = await CheckInternetAccess();
-        if (!hasInternet) {
-          isStartingReceive = false;
-          updateOnlineStatus(false);
-          await handleNetworkModeChange('lan_only');
-          errorMessage = t('error.no_internet_mode');
-          return;
-        }
-      } catch {
-        isStartingReceive = false;
-        updateOnlineStatus(false);
-        await handleNetworkModeChange('lan_only');
-        errorMessage = t('error.no_internet_mode');
-        return;
-      }
-    }
-
     isStartingReceive = true;
     try {
       const res = await StartReceive();
@@ -1104,14 +1114,9 @@
         await generateReceiveQR(getActiveReceiveUrl());
       }
     } catch (err: any) {
-      const msg = err?.message || t('error.start_receive');
-      errorMessage = msg;
-      if (
-        msg.includes('No hay conexión a internet') ||
-        msg.includes('modo no disponible') ||
-        msg.includes('no disponible') ||
-        msg.toLowerCase().includes('no internet')
-      ) {
+      const rawCode = getRawErrorCode(err);
+      errorMessage = resolveBackendError(err, 'error.start_receive');
+      if (rawCode === 'ERR_NO_INTERNET') {
         updateOnlineStatus(false);
         await handleNetworkModeChange('lan_only');
       }
@@ -1131,8 +1136,9 @@
       receiveQrSvg = '';
       receiveQrDataUrl = '';
       receiveQrTarget = 'internet';
+      activeUploads = {};
     } catch (err: any) {
-      errorMessage = err?.message || t('error.stop_receive');
+      errorMessage = resolveBackendError(err, 'error.stop_receive');
     } finally {
       isStoppingReceive = false;
     }
@@ -1169,7 +1175,7 @@
         await performSave();
       }
     } catch (err: any) {
-      errorMessage = err?.message || t('error.select_download_dir');
+      errorMessage = resolveBackendError(err, 'error.select_download_dir');
     }
   }
 
@@ -1177,7 +1183,7 @@
     try {
       await OpenDownloadDir();
     } catch (err: any) {
-      errorMessage = err?.message || t('error.open_download_dir');
+      errorMessage = resolveBackendError(err, 'error.open_download_dir');
     }
   }
 
@@ -1198,7 +1204,7 @@
     try {
       await OpenFile(rf.savedPath);
     } catch (err: any) {
-      setItemWarning(rf.id, t('receive.ready.file_missing'));
+      setItemWarning(rf.id, resolveBackendError(err, 'receive.ready.file_missing'));
     }
   }
 
@@ -1206,7 +1212,7 @@
     try {
       await ShowFileInFolder(rf.savedPath);
     } catch (err: any) {
-      setItemWarning(rf.id, t('receive.ready.file_missing'));
+      setItemWarning(rf.id, resolveBackendError(err, 'receive.ready.file_missing'));
     }
   }
 
@@ -1235,10 +1241,12 @@
       } else {
         shareResult = updatedResult;
         const remainingIDs = new Set(updatedResult.files.map(f => f.id));
-        files = files.filter(f => remainingIDs.has(f.id));
+        const remainingPaths = new Set(updatedResult.files.map(f => (f as any).path).filter(Boolean));
+        files = files.filter(f => remainingIDs.has(f.id) || (remainingPaths.size > 0 && remainingPaths.has(f.path)));
+        syncFilesWithResult(updatedResult);
       }
     } catch (err: any) {
-      errorMessage = err?.message || t('error.remove_from_share');
+      errorMessage = resolveBackendError(err, 'error.remove_from_share');
     } finally {
       isDeleting = false;
     }
@@ -1343,10 +1351,10 @@
   }
 
   function formatBytes(bytes: number): string {
-    if (bytes === 0) return '0 B';
+    if (!bytes || bytes <= 0 || isNaN(bytes)) return '0 B';
     const k = 1024;
     const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
-    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    const i = Math.min(sizes.length - 1, Math.max(0, Math.floor(Math.log(bytes) / Math.log(k))));
     return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
   }
 
@@ -1364,6 +1372,13 @@
     const total = files.reduce((acc, f) => acc + (f.rawBytes || 0), 0);
     return formatBytes(total);
   });
+
+  function formatDeviceName(device: string): string {
+    if (!device || device === 'Browser' || device === 'Navegador') {
+      return t('device.browser');
+    }
+    return device;
+  }
 
   function getDeviceIcon(device: string) {
     const d = (device || '').toLowerCase();
@@ -2485,7 +2500,7 @@
                         <span class="font-medium text-zinc-900 dark:text-zinc-100 truncate min-w-0 shrink" title={transfer.fileName}>{transfer.fileName}</span>
                         <span class="text-zinc-400 text-xs font-mono inline-flex items-baseline min-w-0 shrink-[4]">
                           <span class="shrink-0">(</span>
-                          <span class="truncate min-w-0 shrink-[4]" title={transfer.device}>{transfer.device}</span>
+                          <span class="truncate min-w-0 shrink-[4]" title={formatDeviceName(transfer.device)}>{formatDeviceName(transfer.device)}</span>
                           <span class="shrink-0 mx-1">·</span>
                           <span class="truncate min-w-0 shrink" title={transfer.ip}>{transfer.ip}</span>
                           <span class="shrink-0">)</span>
@@ -2701,18 +2716,43 @@
                   <div class="divide-y divide-zinc-100 dark:divide-zinc-800/60">
                     {#each Object.values(activeUploads) as upload (upload.id)}
                       <div class="py-1.5 flex flex-col gap-1">
-                        <div class="flex items-center justify-between text-xs">
+                        <div class="flex items-center justify-between text-xs gap-3">
                           <span class="font-medium text-zinc-800 dark:text-zinc-200 truncate">{upload.fileName}</span>
-                          <span class="text-xs font-mono text-emerald-600 dark:text-emerald-400">
-                            {upload.progress.toFixed(0)}% · {formatSpeed(upload.speed)}
-                          </span>
+                          {#if upload.status === 'error'}
+                            <span class="text-xs font-medium text-red-600 dark:text-red-400 shrink-0">
+                              {t('receive.uploading.error')}
+                            </span>
+                          {:else if upload.status === 'cancelled'}
+                            <span class="text-xs font-medium text-zinc-500 dark:text-zinc-400 shrink-0">
+                              {t('receive.uploading.cancelled')}
+                            </span>
+                          {:else if upload.status === 'stalled'}
+                            <span class="text-xs font-mono text-amber-600 dark:text-amber-400 shrink-0">
+                              {upload.progress.toFixed(0)}% - {t('receive.uploading.stalled')}
+                            </span>
+                          {:else}
+                            <span class="text-xs font-mono text-emerald-600 dark:text-emerald-400 shrink-0">
+                              {upload.progress.toFixed(0)}%{#if upload.speed > 0} - {formatSpeed(upload.speed)}{/if}
+                            </span>
+                          {/if}
                         </div>
                         <div class="w-full h-1.5 bg-zinc-100 dark:bg-zinc-800 rounded-full overflow-hidden">
                           <div
-                            class="h-full bg-emerald-500 rounded-full transition-all duration-150"
-                            style="width: {upload.progress}%"
+                            class="h-full {upload.status === 'error' ? 'bg-red-500' : upload.status === 'cancelled' ? 'bg-zinc-400' : upload.status === 'stalled' ? 'bg-amber-500' : 'bg-emerald-500'} rounded-full transition-all duration-150"
+                            style="width: {upload.status === 'error' ? 100 : upload.progress}%"
                           ></div>
                         </div>
+                        {#if upload.status !== 'error' && upload.status !== 'cancelled'}
+                          {#if upload.totalBytes > 0}
+                            <div class="flex justify-end text-[11px] font-mono text-zinc-400 dark:text-zinc-500 tabular-nums">
+                              {formatBytes(Math.min(upload.bytesRecv, upload.totalBytes))} / {formatBytes(upload.totalBytes)}
+                            </div>
+                          {:else if upload.bytesRecv > 0}
+                            <div class="flex justify-end text-[11px] font-mono text-zinc-400 dark:text-zinc-500 tabular-nums">
+                              {formatBytes(upload.bytesRecv)}
+                            </div>
+                          {/if}
+                        {/if}
                       </div>
                     {/each}
                   </div>

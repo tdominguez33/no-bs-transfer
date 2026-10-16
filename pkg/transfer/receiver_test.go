@@ -150,3 +150,87 @@ func TestReceiveServerUploadPage(t *testing.T) {
 		t.Errorf("expected upload page title in response body")
 	}
 }
+
+func TestSanitizeFileName(t *testing.T) {
+	cases := []struct {
+		input string
+		want  string
+	}{
+		{"Captura: 12:30?.png", "Captura_ 12_30_.png"},
+		{"CON.txt", "_CON.txt"},
+		{"lpt1", "_lpt1"},
+		{"archivo...", "archivo"},
+		{"a<b>c|d*e\"f.jpg", "a_b_c_d_e_f.jpg"},
+	}
+
+	for _, tc := range cases {
+		got := sanitizeFileName(tc.input)
+		if got != tc.want {
+			t.Errorf("sanitizeFileName(%q) = %q, want %q", tc.input, got, tc.want)
+		}
+	}
+
+	dotDot := sanitizeFileName("..")
+	if dotDot == ".." || dotDot == "." || dotDot == "" {
+		t.Errorf("sanitizeFileName(\"..\") returned unsafe name %q", dotDot)
+	}
+}
+
+func TestReceiveServerChunkedUpload(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	var doneFiles []ReceivedFile
+	srv, err := NewReceiveServer(tmpDir, 0, ReceiveCallbacks{
+		OnFileDone: func(f ReceivedFile) {
+			doneFiles = append(doneFiles, f)
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewReceiveServer failed: %v", err)
+	}
+	defer srv.Stop()
+
+	chunks := [][]byte{
+		[]byte("chunk-0-content-"),
+		[]byte("chunk-1-content-"),
+		[]byte("chunk-2-final"),
+	}
+	totalSize := int64(len(chunks[0]) + len(chunks[1]) + len(chunks[2]))
+	client := &http.Client{Timeout: 5 * time.Second}
+
+	for idx, chunk := range chunks {
+		u := fmt.Sprintf(
+			"http://127.0.0.1:%d/upload?uploadId=up_123&chunkIndex=%d&totalChunks=%d&totalSize=%d&fileName=video%%3Atest.mp4",
+			srv.Port(), idx, len(chunks), totalSize,
+		)
+		req, err := http.NewRequest(http.MethodPost, u, bytes.NewReader(chunk))
+		if err != nil {
+			t.Fatalf("NewRequest chunk %d failed: %v", idx, err)
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatalf("Do chunk %d failed: %v", idx, err)
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("chunk %d expected 200, got %d", idx, resp.StatusCode)
+		}
+	}
+
+	if len(doneFiles) != 1 {
+		t.Fatalf("expected 1 completed file, got %d", len(doneFiles))
+	}
+	if doneFiles[0].Name != "video_test.mp4" {
+		t.Errorf("expected sanitized filename video_test.mp4, got %q", doneFiles[0].Name)
+	}
+
+	savedData, err := os.ReadFile(filepath.Join(tmpDir, "video_test.mp4"))
+	if err != nil {
+		t.Fatalf("ReadFile failed: %v", err)
+	}
+	want := "chunk-0-content-chunk-1-content-chunk-2-final"
+	if string(savedData) != want {
+		t.Errorf("assembled file mismatch: got %q, want %q", string(savedData), want)
+	}
+}
+

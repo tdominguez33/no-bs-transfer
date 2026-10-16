@@ -103,8 +103,20 @@ func CheckInternet() bool {
 	}
 }
 
+// Standard tunnel error codes for frontend internationalization
+const (
+	ErrNoInternet               = "ERR_NO_INTERNET"
+	ErrInvalidTunnelToken       = "ERR_INVALID_TUNNEL_TOKEN"
+	ErrTunnelRateLimited        = "ERR_TUNNEL_RATE_LIMITED"
+	ErrPortInUse                = "ERR_PORT_IN_USE"
+	ErrCloudflaredNotFound      = "ERR_CLOUDFLARED_NOT_FOUND"
+	ErrTunnelTimeout            = "ERR_TUNNEL_TIMEOUT"
+	ErrCustomDomainTunnelFailed = "ERR_CUSTOM_DOMAIN_TUNNEL_FAILED"
+	ErrTunnelFailed             = "ERR_TUNNEL_FAILED"
+)
+
 // FormatTunnelError translates raw cloudflared or networking errors into
-// clean, granular, and user-friendly messages for the interface.
+// standardized error codes for the frontend i18n dictionary.
 func FormatTunnelError(err error, isCustomDomain bool) error {
 	if err == nil {
 		return nil
@@ -114,7 +126,8 @@ func FormatTunnelError(err error, isCustomDomain bool) error {
 	errLower := strings.ToLower(errMsg)
 
 	// 1. Connectivity / DNS / Offline issues
-	if strings.Contains(errLower, "dnsquery") ||
+	if strings.Contains(errLower, "err_no_internet") ||
+		strings.Contains(errLower, "dnsquery") ||
 		strings.Contains(errLower, "argotunnel.com") ||
 		strings.Contains(errLower, "lookup") ||
 		strings.Contains(errLower, "no such host") ||
@@ -128,51 +141,59 @@ func FormatTunnelError(err error, isCustomDomain bool) error {
 		strings.Contains(errLower, "dial tcp") ||
 		strings.Contains(errLower, "i/o timeout") ||
 		strings.Contains(errLower, "quic: timeout") {
-		return fmt.Errorf("No hay conexión a internet, modo no disponible")
+		return fmt.Errorf(ErrNoInternet)
 	}
 
 	// 2. Custom Domain / Token validation issues
-	if isCustomDomain && (strings.Contains(errLower, "token") ||
+	if isCustomDomain && (strings.Contains(errLower, "err_invalid_tunnel_token") ||
+		strings.Contains(errLower, "token") ||
 		strings.Contains(errLower, "unauthorized") ||
 		strings.Contains(errLower, "credentials") ||
 		strings.Contains(errLower, "auth") ||
 		strings.Contains(errLower, "invalid") ||
 		strings.Contains(errLower, "cannot determine default configuration path")) {
-		return fmt.Errorf("El token de Cloudflare Tunnel no es válido o ha expirado. Verifica el token en Configuración.")
+		return fmt.Errorf(ErrInvalidTunnelToken)
 	}
 
 	// 3. Quick tunnel service busy / rate limited
-	if strings.Contains(errLower, "rate limit") ||
+	if strings.Contains(errLower, "err_tunnel_rate_limited") ||
+		strings.Contains(errLower, "rate limit") ||
 		strings.Contains(errLower, "trycloudflare.com") ||
 		strings.Contains(errLower, "503") ||
 		strings.Contains(errLower, "quick tunnel") {
-		return fmt.Errorf("Los servidores de túneles públicos de Cloudflare están saturados en este momento. Intenta nuevamente en unos instantes o utiliza Red Local.")
+		return fmt.Errorf(ErrTunnelRateLimited)
 	}
 
 	// 4. Port collision
-	if strings.Contains(errLower, "address already in use") ||
+	if strings.Contains(errLower, "err_port_in_use") ||
+		strings.Contains(errLower, "address already in use") ||
 		strings.Contains(errLower, "already in use") ||
+		strings.Contains(errLower, "only one usage of each socket address") ||
+		strings.Contains(errLower, "solo se permite un uso de cada dirección") ||
 		strings.Contains(errLower, "bind") {
-		return fmt.Errorf("El puerto de red ya está en uso por otra aplicación. Modifícalo en Configuración.")
+		return fmt.Errorf(ErrPortInUse)
 	}
 
 	// 5. Binary execution / installation issues
-	if strings.Contains(errLower, "cloudflared no encontrado") ||
+	if strings.Contains(errLower, "err_cloudflared_not_found") ||
+		strings.Contains(errLower, "cloudflared no encontrado") ||
 		strings.Contains(errLower, "executable file not found") ||
 		strings.Contains(errLower, "permission denied") {
-		return fmt.Errorf("No se encontró el componente Cloudflared. Puedes descargarlo desde Configuración.")
+		return fmt.Errorf(ErrCloudflaredNotFound)
 	}
 
 	// 6. Generic timeout
-	if strings.Contains(errLower, "tiempo de espera agotado") || strings.Contains(errLower, "timeout") {
-		return fmt.Errorf("Se agotó el tiempo de espera al conectar con Cloudflare. Comprueba tu conexión o utiliza Red Local.")
+	if strings.Contains(errLower, "err_tunnel_timeout") ||
+		strings.Contains(errLower, "tiempo de espera agotado") ||
+		strings.Contains(errLower, "timeout") {
+		return fmt.Errorf(ErrTunnelTimeout)
 	}
 
 	// Fallback
 	if isCustomDomain {
-		return fmt.Errorf("No se pudo iniciar el túnel con el dominio personalizado. Verifica tu configuración y conexión a internet.")
+		return fmt.Errorf(ErrCustomDomainTunnelFailed)
 	}
-	return fmt.Errorf("No se pudo iniciar el túnel de Cloudflare. Intenta usar Red Local.")
+	return fmt.Errorf(ErrTunnelFailed)
 }
 
 var tunnelRegex = regexp.MustCompile(`https://[a-zA-Z0-9-]+\.trycloudflare\.com`)
@@ -197,17 +218,44 @@ func fileExists(path string) bool {
 
 // Manager handles the cloudflared process lifecycle
 type Manager struct {
-	cmd       *exec.Cmd
-	cancel    context.CancelFunc
-	publicURL string
-	waitChan  chan struct{}
-	mu        sync.Mutex
-	running   bool
+	cmd              *exec.Cmd
+	cancel           context.CancelFunc
+	attemptCancel    context.CancelFunc
+	attemptMu        sync.Mutex
+	publicURL        string
+	waitChan         chan struct{}
+	mu               sync.Mutex
+	running          bool
+	onUnexpectedExit func()
 }
 
 // NewManager creates a new tunnel manager
 func NewManager() *Manager {
 	return &Manager{}
+}
+
+// SetOnUnexpectedExit registers a callback invoked if cloudflared terminates unexpectedly mid-session
+func (m *Manager) SetOnUnexpectedExit(fn func()) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.onUnexpectedExit = fn
+}
+
+func (m *Manager) setAttemptCancel(cancel context.CancelFunc) {
+	m.attemptMu.Lock()
+	m.attemptCancel = cancel
+	m.attemptMu.Unlock()
+}
+
+// Abort immediately cancels any in-flight tunnel connection attempt
+func (m *Manager) Abort() {
+	m.attemptMu.Lock()
+	cancel := m.attemptCancel
+	m.attemptCancel = nil
+	m.attemptMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
 }
 
 func hasDevFlag(flagName, envName string) bool {
@@ -282,11 +330,15 @@ func FindCloudflared() (string, error) {
 				`C:\Program Files (x86)\cloudflared\cloudflared.exe`,
 			)
 
-			// WinGet
+			// WinGet (Links shim and Packages folder with source suffix)
 			if localApp := os.Getenv("LOCALAPPDATA"); localApp != "" {
 				commonPaths = append(commonPaths,
+					filepath.Join(localApp, `Microsoft\WinGet\Links\cloudflared.exe`),
 					filepath.Join(localApp, `Microsoft\WinGet\Packages\Cloudflare.cloudflared\cloudflared.exe`),
 				)
+				if matches, err := filepath.Glob(filepath.Join(localApp, `Microsoft\WinGet\Packages\Cloudflare.cloudflared*\cloudflared.exe`)); err == nil {
+					commonPaths = append(commonPaths, matches...)
+				}
 			}
 
 			// Chocolatey
@@ -335,6 +387,8 @@ func FindCloudflared() (string, error) {
 // startAttempt tries to launch cloudflared with the specified CLI arguments.
 func (m *Manager) startAttempt(binPath string, args []string, timeout time.Duration) (string, error) {
 	ctx, cancel := context.WithCancel(context.Background())
+	m.setAttemptCancel(cancel)
+	defer m.setAttemptCancel(nil)
 
 	cmd := exec.CommandContext(ctx, binPath, args...)
 	prepareCmdPlatform(cmd)
@@ -392,13 +446,23 @@ func (m *Manager) startAttempt(binPath string, args []string, timeout time.Durat
 		m.running = true
 		m.waitChan = waitChan
 		m.publicURL = url
-		go func() {
+		go func(currentCmd *exec.Cmd) {
 			<-waitChan
+			var unexpected bool
+			var cb func()
 			m.mu.Lock()
-			m.running = false
-			m.publicURL = ""
+			if m.cmd == currentCmd {
+				m.running = false
+				m.publicURL = ""
+				m.cmd = nil
+				unexpected = true
+				cb = m.onUnexpectedExit
+			}
 			m.mu.Unlock()
-		}()
+			if unexpected && cb != nil {
+				cb()
+			}
+		}(cmd)
 		return url, nil
 	case err := <-errChan:
 		cancel()
@@ -475,6 +539,7 @@ func (m *Manager) Start(port int) (string, error) {
 
 // Stop shuts down the cloudflared process
 func (m *Manager) Stop() {
+	m.Abort()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.stopLocked()
@@ -485,24 +550,30 @@ func (m *Manager) stopLocked() {
 		return
 	}
 
-	if m.cancel != nil {
-		m.cancel()
-	}
-
-	if m.cmd != nil && m.cmd.Process != nil {
-		_ = m.cmd.Process.Kill()
-	}
-
+	cmd := m.cmd
 	waitChan := m.waitChan
+	cancel := m.cancel
+
+	m.cmd = nil
+	m.cancel = nil
+	m.waitChan = nil
 	m.running = false
 	m.publicURL = ""
+
+	if cancel != nil {
+		cancel()
+	}
+
+	if cmd != nil && cmd.Process != nil {
+		_ = cmd.Process.Kill()
+	}
 
 	if waitChan != nil {
 		select {
 		case <-waitChan:
 		case <-time.After(2 * time.Second):
-			if m.cmd != nil && m.cmd.Process != nil {
-				killProcessTree(m.cmd.Process)
+			if cmd != nil && cmd.Process != nil {
+				killProcessTree(cmd.Process)
 			}
 		}
 	}
@@ -538,6 +609,8 @@ func (m *Manager) StartWithToken(token, publicDomain string) (string, error) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	m.cancel = cancel
+	m.setAttemptCancel(cancel)
+	defer m.setAttemptCancel(nil)
 
 	args := []string{"tunnel", "run", "--token", token}
 	if ShouldForceHTTP2() {
@@ -549,13 +622,17 @@ func (m *Manager) StartWithToken(token, publicDomain string) (string, error) {
 
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
+		m.cmd = nil
+		m.cancel = nil
 		cancel()
 		return "", fmt.Errorf("error al conectar stderr de cloudflared: %w", err)
 	}
 
 	if err := cmd.Start(); err != nil {
+		m.cmd = nil
+		m.cancel = nil
 		cancel()
-		return "", fmt.Errorf("error al iniciar túnel con token: %w", err)
+		return "", fmt.Errorf("error al ejecutar cloudflared (dominio propio): %w", err)
 	}
 
 	m.running = true
@@ -583,14 +660,24 @@ func (m *Manager) StartWithToken(token, publicDomain string) (string, error) {
 	}()
 
 	var waitErr error
-	go func() {
-		waitErr = cmd.Wait()
+	go func(currentCmd *exec.Cmd) {
+		waitErr = currentCmd.Wait()
 		close(waitChan)
+		var unexpected bool
+		var cb func()
 		m.mu.Lock()
-		m.running = false
-		m.publicURL = ""
+		if m.cmd == currentCmd {
+			m.running = false
+			m.publicURL = ""
+			m.cmd = nil
+			unexpected = true
+			cb = m.onUnexpectedExit
+		}
 		m.mu.Unlock()
-	}()
+		if unexpected && cb != nil {
+			cb()
+		}
+	}(cmd)
 
 	select {
 	case <-waitChan:

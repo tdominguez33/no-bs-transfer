@@ -51,6 +51,7 @@ export namespace main {
 	}
 	export class FileShareItem {
 	    id: string;
+	    path: string;
 	    name: string;
 	    size: string;
 	    directUrl: string;
@@ -63,6 +64,7 @@ export namespace main {
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.id = source["id"];
+	        this.path = source["path"];
 	        this.name = source["name"];
 	        this.size = source["size"];
 	        this.directUrl = source["directUrl"];

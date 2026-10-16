@@ -176,5 +176,31 @@ export const es: Record<keyof typeof en, string> = {
   'error.download_cloudflared': 'Error al descargar cloudflared',
   'error.download_tunnel_component': 'Fallo al descargar componente de túnel: {err}',
   'error.dropped_files': 'Error al procesar archivos arrastrados',
-  'error.cloudflared_status': 'Error al consultar estado de cloudflared:'
+  'error.dropped_folders_ignored': 'Las carpetas no se pueden compartir directamente y fueron omitidas.',
+  'error.tunnel_unexpected_exit': 'El túnel de Cloudflare se cerró inesperadamente.',
+  'error.cloudflared_status': 'Error al consultar estado de cloudflared:',
+  'device.browser': 'Navegador',
+  'receive.uploading.error': 'Error en la subida',
+  'receive.uploading.stalled': 'Sin respuesta del emisor',
+  'receive.uploading.cancelled': 'Subida cancelada',
+
+  // Standardized Backend Error Codes
+  'error.code.ERR_NO_INTERNET': 'No hay conexión a internet, modo no disponible',
+  'error.code.ERR_INVALID_TUNNEL_TOKEN': 'El token de Cloudflare Tunnel no es válido. Revisa la configuración de Dominio Propio.',
+  'error.code.ERR_TUNNEL_RATE_LIMITED': 'Cloudflare ha alcanzado el límite temporal de conexiones. Espera unos segundos y vuelve a intentarlo.',
+  'error.code.ERR_PORT_IN_USE': 'El puerto local configurado ya está en uso por otra aplicación.',
+  'error.code.ERR_CLOUDFLARED_NOT_FOUND': 'No se encontró el componente de túnel (cloudflared). Descárgalo desde Configuración.',
+  'error.code.ERR_TUNNEL_TIMEOUT': 'Tiempo de espera agotado al conectar con Cloudflare. Verifica tu conexión a internet.',
+  'error.code.ERR_CUSTOM_DOMAIN_TUNNEL_FAILED': 'No se pudo iniciar el túnel con dominio propio. Verifica el token y el dominio en Configuración.',
+  'error.code.ERR_TUNNEL_FAILED': 'No se pudo establecer el túnel con Cloudflare. Verifica tu conexión o cambia al modo Red local.',
+  'error.code.ERR_DOWNLOAD_CANCELLED': 'Descarga cancelada',
+  'error.code.ERR_CLOUDFLARED_DOWNLOAD_FAILED': 'No se pudo descargar cloudflared. Verifica tu conexión a internet.',
+  'error.code.ERR_NO_FILES_TO_SHARE': 'No hay archivos seleccionados para compartir.',
+  'error.code.ERR_SERVER_START_FAILED': 'No se pudo iniciar el servidor local de transferencia.',
+  'error.code.ERR_RECEIVE_SERVER_START_FAILED': 'No se pudo iniciar el servidor local de recepción.',
+  'error.code.ERR_NO_ACTIVE_SESSION': 'No hay una sesión de transferencia activa.',
+  'error.code.ERR_INVALID_NETWORK_MODE': 'Modo de red seleccionado no válido.',
+  'error.code.ERR_DOWNLOAD_DIR_ACCESS': 'No se pudo acceder o crear la carpeta de descargas seleccionada.',
+  'error.code.ERR_FILE_NOT_FOUND': 'El archivo fue movido o eliminado.'
 };
+

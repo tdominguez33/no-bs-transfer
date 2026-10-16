@@ -41,10 +41,12 @@ type TransferStats struct {
 // Tracker manages state across multiple files and guests
 type Tracker struct {
 	mu             sync.RWMutex
+	notifyMu       sync.Mutex
 	transfers      map[string]*GuestTransfer
 	totalBytesSent int64
 	onUpdate       func(stats TransferStats)
 	stopChan       chan struct{}
+	stopOnce       sync.Once
 }
 
 // NewTracker creates a new multi-file tracker
@@ -61,12 +63,14 @@ func NewTracker(onUpdate func(stats TransferStats)) *Tracker {
 
 // Stop shuts down the background calculation loop
 func (t *Tracker) Stop() {
-	close(t.stopChan)
+	t.stopOnce.Do(func() {
+		close(t.stopChan)
+	})
 }
 
 // StartTransfer starts or resumes tracking a guest downloading a specific file.
 // If startOffset is 0, it resets progress (new download or restarted from scratch).
-// If startOffset > 0, it sets progress to that offset (resuming a paused download).
+// If startOffset > 0, it sets progress to that offset when resuming a paused download.
 func (t *Tracker) StartTransfer(guestID, fileID, fileName string, fileSize int64, ip, userAgent string, startOffset int64) *GuestTransfer {
 	key := guestID + ":" + fileID
 
@@ -99,13 +103,14 @@ func (t *Tracker) StartTransfer(guestID, fileID, fileName string, fileSize int64
 	activeBefore := atomic.AddInt32(&gt.activeConns, 1) - 1
 
 	if activeBefore == 0 {
+		curBytes := atomic.LoadInt64(&gt.BytesSent)
 		if startOffset <= 0 {
 			atomic.StoreInt64(&gt.BytesSent, 0)
 			gt.lastBytes = 0
 			gt.Progress = 0
 			gt.Speed = 0
 			gt.ConnectedAt = time.Now()
-		} else {
+		} else if !exists || startOffset <= curBytes {
 			atomic.StoreInt64(&gt.BytesSent, startOffset)
 			gt.lastBytes = startOffset
 			if gt.TotalBytes > 0 {
@@ -235,6 +240,8 @@ func (t *Tracker) collectStatsLocked() TransferStats {
 
 func (t *Tracker) notifyUpdate(stats TransferStats) {
 	if t.onUpdate != nil {
+		t.notifyMu.Lock()
+		defer t.notifyMu.Unlock()
 		t.onUpdate(stats)
 	}
 }
@@ -320,6 +327,6 @@ func parseDevice(ua string) string {
 	case strings.Contains(low, "powershell"):
 		return "PowerShell"
 	default:
-		return "Navegador"
+		return "Browser"
 	}
 }

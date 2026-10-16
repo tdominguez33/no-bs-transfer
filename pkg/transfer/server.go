@@ -2,15 +2,15 @@ package transfer
 
 import (
 	"context"
-	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"html/template"
 	"io"
+	"mime"
 	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -214,15 +214,29 @@ func isValidGuestID(val string) bool {
 	return true
 }
 
+func extractClientIP(r *http.Request) string {
+	clientIP := r.RemoteAddr
+	if forwarded := r.Header.Get("CF-Connecting-IP"); forwarded != "" {
+		clientIP = strings.TrimSpace(forwarded)
+	} else if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		parts := strings.Split(xff, ",")
+		clientIP = strings.TrimSpace(parts[0])
+	}
+	if host, _, err := net.SplitHostPort(clientIP); err == nil {
+		clientIP = host
+	}
+	return clientIP
+}
+
 func (s *Server) getGuestID(w http.ResponseWriter, r *http.Request) string {
 	cookie, err := r.Cookie("nbs_guest")
 	if err == nil && isValidGuestID(cookie.Value) {
 		return cookie.Value
 	}
 
-	b := make([]byte, 6)
-	_, _ = rand.Read(b)
-	id := hex.EncodeToString(b)
+	clientIP := extractClientIP(r)
+	sum := sha256.Sum256([]byte(clientIP + "|" + r.UserAgent()))
+	id := hex.EncodeToString(sum[:6])
 
 	http.SetCookie(w, &http.Cookie{
 		Name:     "nbs_guest",
@@ -352,8 +366,11 @@ func (s *Server) serveFile(w http.ResponseWriter, r *http.Request, fileInfo *Sha
 		return
 	}
 
-	escapedName := url.PathEscape(fileInfo.Name)
-	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q; filename*=UTF-8''%s", fileInfo.Name, escapedName))
+	disposition := mime.FormatMediaType("attachment", map[string]string{"filename": fileInfo.Name})
+	if disposition == "" {
+		disposition = "attachment"
+	}
+	w.Header().Set("Content-Disposition", disposition)
 	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
 
 	// If HEAD request, serve headers only without creating a transfer record
@@ -375,16 +392,7 @@ func (s *Server) serveFile(w http.ResponseWriter, r *http.Request, fileInfo *Sha
 	r = r.WithContext(dlCtx)
 
 	guestID := s.getGuestID(w, r)
-	clientIP := r.RemoteAddr
-	if forwarded := r.Header.Get("CF-Connecting-IP"); forwarded != "" {
-		clientIP = strings.TrimSpace(forwarded)
-	} else if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		parts := strings.Split(xff, ",")
-		clientIP = strings.TrimSpace(parts[0])
-	}
-	if host, _, err := net.SplitHostPort(clientIP); err == nil {
-		clientIP = host
-	}
+	clientIP := extractClientIP(r)
 
 	startOffset := parseRangeStart(r.Header.Get("Range"), fi.Size())
 	gt := s.tracker.StartTransfer(guestID, fileInfo.ID, fileInfo.Name, fi.Size(), clientIP, r.UserAgent(), startOffset)

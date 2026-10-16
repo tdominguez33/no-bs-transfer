@@ -256,7 +256,7 @@ func Load() *AppConfig {
 				if cfg.DownloadDir == "" {
 					cfg.DownloadDir = DefaultDownloadDir()
 				}
-				if cfg.FixedPort <= 0 {
+				if cfg.FixedPort < 1024 || cfg.FixedPort > 65535 {
 					cfg.FixedPort = 56789
 				}
 				if cfg.WindowWidth < 450 {
@@ -291,7 +291,7 @@ func Load() *AppConfig {
 			if cfg.DownloadDir == "" {
 				cfg.DownloadDir = DefaultDownloadDir()
 			}
-			if cfg.FixedPort <= 0 {
+			if cfg.FixedPort < 1024 || cfg.FixedPort > 65535 {
 				cfg.FixedPort = 56789
 			}
 			if cfg.WindowWidth < 450 {
@@ -323,7 +323,7 @@ func Save(cfg *AppConfig) error {
 		cfg.DownloadDir = DefaultDownloadDir()
 	}
 
-	if cfg.FixedPort <= 0 {
+	if cfg.FixedPort < 1024 || cfg.FixedPort > 65535 {
 		cfg.FixedPort = 56789
 	}
 

@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html/template"
 	"io"
@@ -12,8 +13,10 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -35,7 +38,7 @@ type ReceiveProgress struct {
 	TotalBytes int64   `json:"totalBytes"`
 	Speed      float64 `json:"speed"`
 	Progress   float64 `json:"progress"`
-	Status     string  `json:"status"` // "uploading", "completed", "error"
+	Status     string  `json:"status"` // "uploading", "stalled", "completed", "cancelled", "error"
 	Error      string  `json:"error,omitempty"`
 }
 
@@ -45,15 +48,57 @@ type ReceiveCallbacks struct {
 	OnFileDone func(f ReceivedFile)
 }
 
+type chunkUploadState struct {
+	mu         sync.Mutex
+	fileID     string
+	fileName   string
+	targetPath string
+	tempPath   string
+	totalSize  int64
+	bytesRecv  int64
+	nextChunk  int
+	lastEmit   time.Time
+	// Speed reference point, set when the first chunk finishes. Tunnels (Cloudflare)
+	// buffer each chunk and deliver it in a burst, so speed is only meaningful as an
+	// average measured across whole chunk cycles, starting at a chunk boundary.
+	rateStart time.Time
+	rateBytes int64
+	finished  bool // completed or aborted; guarded by mu
+
+	clientSpeed atomic.Int64 // Speed in bytes/sec measured and reported by client
+	// Liveness, read by the watchdog without mu (mu is held for a whole chunk copy).
+	lastSeen  atomic.Int64 // unix nanos of the last data or heartbeat from the sender
+	liveBytes atomic.Int64 // bytes written, including the in-flight chunk
+	stalled   atomic.Bool
+	// abortActive interrupts the in-flight chunk request, if any. Guarded by ReceiveServer.mu.
+	abortActive func()
+}
+
+// Upload liveness thresholds. The sender page pings every few seconds while its
+// upload is progressing; with tunnel buffering, chunk data itself can be silent
+// for a long time, so heartbeats are the primary signal.
+var (
+	uploadStallAfter    = 15 * time.Second
+	uploadAbortAfter    = 2 * time.Minute
+	uploadWatchInterval = 2 * time.Second
+)
+
 // ReceiveServer hosts the upload endpoint and web interface for receiving files
 type ReceiveServer struct {
-	downloadDir string
-	listener    net.Listener
-	httpSrv     *http.Server
-	port        int
-	callbacks   ReceiveCallbacks
-	mu          sync.RWMutex
-	running     bool
+	downloadDir   string
+	listener      net.Listener
+	httpSrv       *http.Server
+	port          int
+	callbacks     ReceiveCallbacks
+	mu            sync.RWMutex
+	fileAllocMu   sync.Mutex
+	running       bool
+	activeUploads map[int64]context.CancelFunc
+	nextUploadID  int64
+	chunkUploads  map[string]*chunkUploadState
+	stallAfter    time.Duration
+	abortAfter    time.Duration
+	stopWatch     chan struct{}
 }
 
 // NewReceiveServer starts an HTTP server listening for file uploads
@@ -79,16 +124,23 @@ func NewReceiveServer(downloadDir string, fixedPort int, callbacks ReceiveCallba
 	port := listener.Addr().(*net.TCPAddr).Port
 
 	s := &ReceiveServer{
-		downloadDir: downloadDir,
-		listener:    listener,
-		port:        port,
-		callbacks:   callbacks,
-		running:     true,
+		downloadDir:   downloadDir,
+		listener:      listener,
+		port:          port,
+		callbacks:     callbacks,
+		running:       true,
+		activeUploads: make(map[int64]context.CancelFunc),
+		chunkUploads:  make(map[string]*chunkUploadState),
+		stallAfter:    uploadStallAfter,
+		abortAfter:    uploadAbortAfter,
+		stopWatch:     make(chan struct{}),
 	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", s.handleRouter)
 	mux.HandleFunc("/upload", s.handleUpload)
+	mux.HandleFunc("/upload/ping", s.handleUploadPing)
+	mux.HandleFunc("/upload/cancel", s.handleUploadCancel)
 	mux.HandleFunc("/api/status", s.handleStatus)
 
 	s.httpSrv = &http.Server{
@@ -101,6 +153,7 @@ func NewReceiveServer(downloadDir string, fixedPort int, callbacks ReceiveCallba
 	go func() {
 		_ = s.httpSrv.Serve(listener)
 	}()
+	go s.watchUploads(uploadWatchInterval)
 
 	return s, nil
 }
@@ -128,6 +181,31 @@ func (s *ReceiveServer) SetDownloadDir(dir string) error {
 	return nil
 }
 
+func (s *ReceiveServer) registerUpload(cancel context.CancelFunc) (int64, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if !s.running {
+		return 0, false
+	}
+	s.nextUploadID++
+	id := s.nextUploadID
+	if s.activeUploads == nil {
+		s.activeUploads = make(map[int64]context.CancelFunc)
+	}
+	s.activeUploads[id] = cancel
+	return id, true
+}
+
+func (s *ReceiveServer) unregisterUpload(id int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.activeUploads != nil {
+		delete(s.activeUploads, id)
+	}
+}
+
 func (s *ReceiveServer) Stop() {
 	s.mu.Lock()
 	if !s.running {
@@ -135,7 +213,26 @@ func (s *ReceiveServer) Stop() {
 		return
 	}
 	s.running = false
+	close(s.stopWatch)
+
+	var cancels []context.CancelFunc
+	for _, cancel := range s.activeUploads {
+		cancels = append(cancels, cancel)
+	}
+	s.activeUploads = nil
+
+	var orphanedTempFiles []string
+	for _, state := range s.chunkUploads {
+		if state.tempPath != "" {
+			orphanedTempFiles = append(orphanedTempFiles, state.tempPath)
+		}
+	}
+	s.chunkUploads = nil
 	s.mu.Unlock()
+
+	for _, cancel := range cancels {
+		cancel()
+	}
 
 	if s.httpSrv != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -143,6 +240,10 @@ func (s *ReceiveServer) Stop() {
 		if err := s.httpSrv.Shutdown(ctx); err != nil {
 			_ = s.httpSrv.Close()
 		}
+	}
+
+	for _, tempPath := range orphanedTempFiles {
+		_ = os.Remove(tempPath)
 	}
 }
 
@@ -216,15 +317,47 @@ func generateReceiveFileID() string {
 	return hex.EncodeToString(b)
 }
 
-func resolveUniqueFilename(targetDir, originalName string) string {
-	cleanName := filepath.Base(originalName)
-	cleanName = strings.ReplaceAll(cleanName, "\\", "_")
-	cleanName = strings.ReplaceAll(cleanName, "/", "_")
-	cleanName = strings.ReplaceAll(cleanName, "\x00", "")
-	cleanName = strings.TrimSpace(cleanName)
-	if cleanName == "" || cleanName == "." {
-		cleanName = fmt.Sprintf("archivo_%d", time.Now().Unix())
+var windowsReservedNames = map[string]bool{
+	"CON": true, "PRN": true, "AUX": true, "NUL": true,
+	"COM1": true, "COM2": true, "COM3": true, "COM4": true, "COM5": true,
+	"COM6": true, "COM7": true, "COM8": true, "COM9": true,
+	"LPT1": true, "LPT2": true, "LPT3": true, "LPT4": true, "LPT5": true,
+	"LPT6": true, "LPT7": true, "LPT8": true, "LPT9": true,
+}
+
+func sanitizeFileName(originalName string) string {
+	// Normalize both slashes first so filepath.Base works consistently across OSes
+	normalized := strings.ReplaceAll(originalName, "\\", "/")
+	cleanName := filepath.Base(normalized)
+
+	var b strings.Builder
+	b.Grow(len(cleanName))
+	for _, r := range cleanName {
+		if r < 32 || strings.ContainsRune(`<>:"/\|?*`, r) {
+			b.WriteByte('_')
+		} else {
+			b.WriteRune(r)
+		}
 	}
+
+	cleanName = strings.TrimSpace(b.String())
+	cleanName = strings.TrimRight(cleanName, ". ")
+	if cleanName == "" || cleanName == "." || cleanName == ".." {
+		return fmt.Sprintf("archivo_%d", time.Now().Unix())
+	}
+
+	ext := filepath.Ext(cleanName)
+	base := strings.TrimSuffix(cleanName, ext)
+	baseTrimmed := strings.TrimRight(base, ". ")
+	if windowsReservedNames[strings.ToUpper(baseTrimmed)] {
+		cleanName = "_" + cleanName
+	}
+
+	return cleanName
+}
+
+func resolveUniqueFilename(targetDir, originalName string) string {
+	cleanName := sanitizeFileName(originalName)
 
 	destPath := filepath.Join(targetDir, cleanName)
 	if _, err := os.Stat(destPath); os.IsNotExist(err) {
@@ -247,29 +380,84 @@ func resolveUniqueFilename(targetDir, originalName string) string {
 	}
 }
 
+// createUniquePartFile atomically reserves a unique destination path and creates its .part file
+func (s *ReceiveServer) createUniquePartFile(targetDir, originalName string) (*os.File, string, string, error) {
+	s.fileAllocMu.Lock()
+	defer s.fileAllocMu.Unlock()
+
+	cleanName := sanitizeFileName(originalName)
+	ext := filepath.Ext(cleanName)
+	base := strings.TrimSuffix(cleanName, ext)
+
+	for counter := 0; ; counter++ {
+		var candidate string
+		if counter == 0 {
+			candidate = filepath.Join(targetDir, cleanName)
+		} else {
+			candidate = filepath.Join(targetDir, fmt.Sprintf("%s (%d)%s", base, counter, ext))
+		}
+
+		if _, err := os.Stat(candidate); !os.IsNotExist(err) {
+			continue
+		}
+
+		tempPath := candidate + ".part"
+		out, err := os.OpenFile(tempPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0644)
+		if err != nil {
+			if errors.Is(err, os.ErrExist) {
+				continue
+			}
+			return nil, "", "", err
+		}
+
+		return out, candidate, tempPath, nil
+	}
+}
+
 // countingWriter wraps an io.Writer and emits speed and progress updates
 type countingWriter struct {
-	writer      io.Writer
-	fileID      string
-	fileName    string
-	totalBytes  int64
-	bytesRecv   int64
-	lastEmit    time.Time
-	lastBytes   int64
+	ctx        context.Context
+	writer     io.Writer
+	fileID     string
+	fileName   string
+	totalBytes int64
+	bytesRecv  int64
+	lastEmit   time.Time
+	// Speed = (bytesRecv - rateBytes) / since(rateStart). Zero rateStart means no
+	// reliable reference yet, and speed is reported as 0 (hidden in the UI).
+	rateStart   time.Time
+	rateBytes   int64
+	clientSpeed func() int64
 	onProgress  func(ReceiveProgress)
+	onData      func(bytesRecv int64) // optional, called on every successful write
 	emitLock    sync.Mutex
 }
 
 func (cw *countingWriter) Write(p []byte) (int, error) {
+	if cw.ctx != nil {
+		select {
+		case <-cw.ctx.Done():
+			return 0, errors.New("subida cancelada: servidor detenido")
+		default:
+		}
+	}
 	n, err := cw.writer.Write(p)
 	if n > 0 {
 		cw.bytesRecv += int64(n)
+		if cw.onData != nil {
+			cw.onData(cw.bytesRecv)
+		}
 		cw.emitLock.Lock()
 		now := time.Now()
-		elapsed := now.Sub(cw.lastEmit)
-		if elapsed >= 200*time.Millisecond && cw.onProgress != nil {
-			bytesDiff := cw.bytesRecv - cw.lastBytes
-			speed := float64(bytesDiff) / elapsed.Seconds()
+		if now.Sub(cw.lastEmit) >= 200*time.Millisecond && cw.onProgress != nil {
+			var speed float64
+			if cw.clientSpeed != nil && cw.clientSpeed() > 0 {
+				speed = float64(cw.clientSpeed())
+			} else if !cw.rateStart.IsZero() {
+				if secs := now.Sub(cw.rateStart).Seconds(); secs > 0 {
+					speed = float64(cw.bytesRecv-cw.rateBytes) / secs
+				}
+			}
 			var progress float64
 			if cw.totalBytes > 0 {
 				progress = (float64(cw.bytesRecv) / float64(cw.totalBytes)) * 100
@@ -288,7 +476,6 @@ func (cw *countingWriter) Write(p []byte) (int, error) {
 				Status:     "uploading",
 			})
 			cw.lastEmit = now
-			cw.lastBytes = cw.bytesRecv
 		}
 		cw.emitLock.Unlock()
 	}
@@ -305,6 +492,23 @@ func (s *ReceiveServer) handleUpload(w http.ResponseWriter, r *http.Request) {
 
 	if r.Method != http.MethodPost {
 		http.Error(w, "Método no permitido", http.StatusMethodNotAllowed)
+		return
+	}
+
+	upCtx, cancel := context.WithCancel(r.Context())
+	defer cancel()
+
+	upID, ok := s.registerUpload(cancel)
+	if !ok {
+		http.Error(w, "Servidor deteniéndose", http.StatusServiceUnavailable)
+		return
+	}
+	defer s.unregisterUpload(upID)
+
+	r = r.WithContext(upCtx)
+
+	if r.URL.Query().Get("uploadId") != "" {
+		s.handleChunkedUpload(w, r, upCtx, cancel)
 		return
 	}
 
@@ -337,24 +541,23 @@ func (s *ReceiveServer) handleUpload(w http.ResponseWriter, r *http.Request) {
 		}
 
 		fileID := generateReceiveFileID()
-		targetPath := resolveUniqueFilename(targetDir, filename)
-		actualFileName := filepath.Base(targetPath)
-		tempPath := targetPath + ".part"
-
-		out, err := os.Create(tempPath)
+		out, targetPath, tempPath, err := s.createUniquePartFile(targetDir, filename)
 		if err != nil {
 			_ = part.Close()
 			http.Error(w, fmt.Sprintf("Error al crear archivo de destino: %v", err), http.StatusInternalServerError)
 			return
 		}
+		actualFileName := filepath.Base(targetPath)
 
 		totalEstimated := r.ContentLength
 		cw := &countingWriter{
+			ctx:        upCtx,
 			writer:     out,
 			fileID:     fileID,
 			fileName:   actualFileName,
 			totalBytes: totalEstimated,
 			lastEmit:   time.Now(),
+			rateStart:  time.Now(),
 			onProgress: s.callbacks.OnProgress,
 		}
 
@@ -440,6 +643,381 @@ func (s *ReceiveServer) handleUpload(w http.ResponseWriter, r *http.Request) {
 		"success": true,
 		"files":   savedFiles,
 	})
+}
+
+func (s *ReceiveServer) handleChunkedUpload(w http.ResponseWriter, r *http.Request, upCtx context.Context, cancel context.CancelFunc) {
+	q := r.URL.Query()
+	uploadID := strings.TrimSpace(q.Get("uploadId"))
+	chunkIndex, errIdx := strconv.Atoi(q.Get("chunkIndex"))
+	totalChunks, errTotal := strconv.Atoi(q.Get("totalChunks"))
+	totalSize, errSize := strconv.ParseInt(q.Get("totalSize"), 10, 64)
+	origFileName := q.Get("fileName")
+
+	if uploadID == "" || errIdx != nil || errTotal != nil || errSize != nil ||
+		chunkIndex < 0 || totalChunks < 1 || chunkIndex >= totalChunks || totalSize < 0 {
+		http.Error(w, "Parámetros de fragmento inválidos", http.StatusBadRequest)
+		return
+	}
+
+	targetDir := s.DownloadDir()
+	_ = os.MkdirAll(targetDir, 0755)
+
+	var state *chunkUploadState
+	var out *os.File
+
+	s.mu.RLock()
+	state = s.chunkUploads[uploadID]
+	s.mu.RUnlock()
+
+	if state == nil && chunkIndex == 0 {
+		newOut, targetPath, tempPath, err := s.createUniquePartFile(targetDir, origFileName)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("Error al crear archivo de destino: %v", err), http.StatusInternalServerError)
+			return
+		}
+		out = newOut
+		state = &chunkUploadState{
+			fileID:     generateReceiveFileID(),
+			fileName:   filepath.Base(targetPath),
+			targetPath: targetPath,
+			tempPath:   tempPath,
+			totalSize:  totalSize,
+			bytesRecv:  0,
+			nextChunk:  0,
+			lastEmit:   time.Now(),
+		}
+
+		s.mu.Lock()
+		if !s.running {
+			s.mu.Unlock()
+			_ = out.Close()
+			_ = os.Remove(tempPath)
+			http.Error(w, "Servidor deteniéndose", http.StatusServiceUnavailable)
+			return
+		}
+		if existing := s.chunkUploads[uploadID]; existing != nil {
+			// A concurrent retry registered the session first: use that one.
+			s.mu.Unlock()
+			_ = out.Close()
+			_ = os.Remove(tempPath)
+			out = nil
+			state = existing
+		} else {
+			s.chunkUploads[uploadID] = state
+			s.mu.Unlock()
+
+			if s.callbacks.OnProgress != nil {
+				s.callbacks.OnProgress(ReceiveProgress{
+					ID:         state.fileID,
+					FileName:   state.fileName,
+					BytesRecv:  0,
+					TotalBytes: state.totalSize,
+					Speed:      0,
+					Progress:   0,
+					Status:     "uploading",
+				})
+			}
+		}
+	} else if state == nil {
+		http.Error(w, "Sesión de subida no encontrada", http.StatusBadRequest)
+		return
+	}
+
+	s.touchUpload(state)
+	if spStr := q.Get("clientSpeed"); spStr != "" {
+		if sp, err := strconv.ParseInt(spStr, 10, 64); err == nil && sp >= 0 {
+			state.clientSpeed.Store(sp)
+		}
+	}
+
+	// Let abortChunkUpload interrupt this request even if the body read is blocked
+	// (sender vanished mid-chunk): cancelling the context alone doesn't unblock reads.
+	rc := http.NewResponseController(w)
+	s.mu.Lock()
+	state.abortActive = func() {
+		cancel()
+		_ = rc.SetReadDeadline(time.Now())
+	}
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		state.abortActive = nil
+		s.mu.Unlock()
+	}()
+
+	state.mu.Lock()
+	defer state.mu.Unlock()
+
+	if state.finished {
+		if out != nil {
+			_ = out.Close()
+		}
+		http.Error(w, "Subida cancelada", http.StatusGone)
+		return
+	}
+
+	if chunkIndex != state.nextChunk {
+		if out != nil {
+			_ = out.Close()
+		}
+		http.Error(w, fmt.Sprintf("Fragmento fuera de orden: esperado %d, recibido %d", state.nextChunk, chunkIndex), http.StatusConflict)
+		return
+	}
+
+	if out == nil {
+		var err error
+		out, err = os.OpenFile(state.tempPath, os.O_WRONLY, 0644)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("Error al abrir archivo temporal: %v", err), http.StatusInternalServerError)
+			return
+		}
+		if _, err := out.Seek(state.bytesRecv, io.SeekStart); err != nil {
+			_ = out.Close()
+			http.Error(w, fmt.Sprintf("Error al posicionar archivo temporal: %v", err), http.StatusInternalServerError)
+			return
+		}
+		_ = out.Truncate(state.bytesRecv)
+	}
+
+	cw := &countingWriter{
+		ctx:         upCtx,
+		writer:      out,
+		fileID:      state.fileID,
+		fileName:    state.fileName,
+		totalBytes:  state.totalSize,
+		bytesRecv:   state.bytesRecv,
+		lastEmit:    state.lastEmit,
+		rateStart:   state.rateStart,
+		rateBytes:   state.rateBytes,
+		clientSpeed: state.clientSpeed.Load,
+		onProgress:  s.callbacks.OnProgress,
+		onData: func(b int64) {
+			state.liveBytes.Store(b)
+			s.touchUpload(state)
+		},
+	}
+
+	copied, copyErr := io.Copy(cw, r.Body)
+	closeErr := out.Close()
+	if copyErr == nil && closeErr != nil {
+		copyErr = closeErr
+	}
+
+	if copyErr != nil {
+		// Keep state so client can retry this chunk; truncate partial bytes on next attempt.
+		// The sender most likely went away: stop showing a live speed right now.
+		state.liveBytes.Store(state.bytesRecv)
+		if state.stalled.CompareAndSwap(false, true) {
+			s.emitLive(state, "stalled")
+		}
+		http.Error(w, fmt.Sprintf("Error al escribir fragmento: %v", copyErr), http.StatusInternalServerError)
+		return
+	}
+
+	state.bytesRecv += copied
+	state.lastEmit = cw.lastEmit
+	if state.rateStart.IsZero() {
+		state.rateStart = time.Now()
+		state.rateBytes = state.bytesRecv
+	}
+	state.nextChunk++
+
+	isLastChunk := chunkIndex == totalChunks-1
+	if !isLastChunk {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"success":    true,
+			"chunkIndex": chunkIndex,
+			"bytesRecv":  state.bytesRecv,
+		})
+		return
+	}
+
+	// Final chunk completed: remove from active chunk sessions and rename .part to targetPath
+	s.mu.Lock()
+	delete(s.chunkUploads, uploadID)
+	s.mu.Unlock()
+	state.finished = true
+
+	if err := os.Rename(state.tempPath, state.targetPath); err != nil {
+		_ = os.Remove(state.tempPath)
+		if s.callbacks.OnProgress != nil {
+			s.callbacks.OnProgress(ReceiveProgress{
+				ID:       state.fileID,
+				FileName: state.fileName,
+				Status:   "error",
+				Error:    err.Error(),
+			})
+		}
+		http.Error(w, fmt.Sprintf("Error al finalizar archivo: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	item := ReceivedFile{
+		ID:          state.fileID,
+		Name:        state.fileName,
+		Size:        formatBytes(state.bytesRecv),
+		RawBytes:    state.bytesRecv,
+		SavedPath:   state.targetPath,
+		CompletedAt: time.Now().Format("15:04:05"),
+	}
+
+	if s.callbacks.OnProgress != nil {
+		s.callbacks.OnProgress(ReceiveProgress{
+			ID:         state.fileID,
+			FileName:   state.fileName,
+			BytesRecv:  state.bytesRecv,
+			TotalBytes: state.bytesRecv,
+			Speed:      0,
+			Progress:   100,
+			Status:     "completed",
+		})
+	}
+
+	if s.callbacks.OnFileDone != nil {
+		s.callbacks.OnFileDone(item)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": true,
+		"files":   []ReceivedFile{item},
+	})
+}
+
+// touchUpload records sender activity and leaves the stalled state if needed.
+func (s *ReceiveServer) touchUpload(st *chunkUploadState) {
+	st.lastSeen.Store(time.Now().UnixNano())
+	if st.stalled.CompareAndSwap(true, false) {
+		s.emitLive(st, "uploading")
+	}
+}
+
+// emitLive reports a status change from outside the data path.
+func (s *ReceiveServer) emitLive(st *chunkUploadState, status string) {
+	if s.callbacks.OnProgress == nil {
+		return
+	}
+	recv := st.liveBytes.Load()
+	var progress float64
+	if st.totalSize > 0 {
+		progress = min(float64(recv)/float64(st.totalSize)*100, 99.9)
+	}
+	var speed float64
+	if status == "uploading" {
+		speed = float64(st.clientSpeed.Load())
+	}
+	s.callbacks.OnProgress(ReceiveProgress{
+		ID:         st.fileID,
+		FileName:   st.fileName,
+		BytesRecv:  recv,
+		TotalBytes: st.totalSize,
+		Speed:      speed,
+		Progress:   progress,
+		Status:     status,
+	})
+}
+
+// watchUploads marks silent uploads as stalled and aborts them once the sender
+// has been gone for abortAfter (closed tab, lost connection, killed browser).
+func (s *ReceiveServer) watchUploads(interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-s.stopWatch:
+			return
+		case <-ticker.C:
+		}
+
+		now := time.Now()
+		var stalled []*chunkUploadState
+		var abort []string
+		s.mu.RLock()
+		for id, st := range s.chunkUploads {
+			idle := now.Sub(time.Unix(0, st.lastSeen.Load()))
+			if idle >= s.abortAfter {
+				abort = append(abort, id)
+			} else if idle >= s.stallAfter && st.stalled.CompareAndSwap(false, true) {
+				stalled = append(stalled, st)
+			}
+		}
+		s.mu.RUnlock()
+
+		for _, st := range stalled {
+			s.emitLive(st, "stalled")
+		}
+		for _, id := range abort {
+			// May wait for an in-flight chunk handler to unwind; don't block the watchdog.
+			go s.abortChunkUpload(id)
+		}
+	}
+}
+
+// abortChunkUpload drops an unfinished chunked upload, interrupts its in-flight
+// request, deletes the .part file and reports it as cancelled.
+func (s *ReceiveServer) abortChunkUpload(uploadID string) {
+	s.mu.Lock()
+	st := s.chunkUploads[uploadID]
+	if st == nil {
+		s.mu.Unlock()
+		return
+	}
+	delete(s.chunkUploads, uploadID)
+	abortActive := st.abortActive
+	s.mu.Unlock()
+
+	if abortActive != nil {
+		abortActive()
+	}
+
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if st.finished {
+		return
+	}
+	st.finished = true
+	_ = os.Remove(st.tempPath)
+	s.emitLive(st, "cancelled")
+}
+
+// handleUploadPing is the sender page heartbeat while an upload is progressing.
+func (s *ReceiveServer) handleUploadPing(w http.ResponseWriter, r *http.Request) {
+	s.setCORSHeaders(w)
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	uploadID := strings.TrimSpace(r.URL.Query().Get("uploadId"))
+	s.mu.RLock()
+	st := s.chunkUploads[uploadID]
+	s.mu.RUnlock()
+	if st == nil {
+		http.NotFound(w, r)
+		return
+	}
+	if spStr := r.URL.Query().Get("speed"); spStr != "" {
+		if sp, err := strconv.ParseInt(spStr, 10, 64); err == nil && sp >= 0 {
+			st.clientSpeed.Store(sp)
+		}
+	}
+	s.touchUpload(st)
+	if !st.stalled.Load() && st.clientSpeed.Load() > 0 {
+		s.emitLive(st, "uploading")
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleUploadCancel is sent by the sender page (sendBeacon) when it is closed or
+// gives up, so the host doesn't have to wait for the inactivity timeout.
+func (s *ReceiveServer) handleUploadCancel(w http.ResponseWriter, r *http.Request) {
+	s.setCORSHeaders(w)
+	if r.Method == http.MethodPost {
+		if uploadID := strings.TrimSpace(r.URL.Query().Get("uploadId")); uploadID != "" {
+			go s.abortChunkUpload(uploadID)
+		}
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 var receivePageTemplate = template.Must(template.New("receive").Parse(`<!DOCTYPE html>
@@ -733,6 +1311,8 @@ var receivePageTemplate = template.Must(template.New("receive").Parse(`<!DOCTYPE
       justify-content: space-between;
       font-size: 0.75rem;
       color: var(--muted);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-variant-numeric: tabular-nums;
     }
     .status-badge {
       font-weight: 500;
@@ -849,10 +1429,10 @@ var receivePageTemplate = template.Must(template.New("receive").Parse(`<!DOCTYPE
     });
 
     function formatBytes(bytes) {
-      if (bytes === 0) return '0 B';
+      if (!bytes || bytes <= 0 || isNaN(bytes)) return '0 B';
       const k = 1024;
       const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
-      const i = Math.floor(Math.log(bytes) / Math.log(k));
+      const i = Math.min(sizes.length - 1, Math.max(0, Math.floor(Math.log(bytes) / Math.log(k))));
       return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
     }
 
@@ -860,18 +1440,59 @@ var receivePageTemplate = template.Must(template.New("receive").Parse(`<!DOCTYPE
       return formatBytes(bytesPerSec) + '/s';
     }
 
-    function uploadFiles(files) {
-      files.forEach(file => {
-        uploadSingleFile(file);
-      });
+    const CHUNK_SIZE = 25 * 1024 * 1024;
+    const MAX_CONCURRENT = 2;
+    const PING_INTERVAL_MS = 5000;
+    const uploadQueue = [];
+    const inFlightUploads = new Set();
+    let activeUploadsCount = 0;
+
+    function pingHost(uploadId, speed) {
+      let url = '/upload/ping?uploadId=' + encodeURIComponent(uploadId);
+      if (speed && speed > 0) {
+        url += '&speed=' + encodeURIComponent(Math.round(speed));
+      }
+      fetch(url, { method: 'POST' }).catch(() => {});
     }
 
-    function uploadSingleFile(file) {
+    function cancelOnHost(uploadId) {
+      const url = '/upload/cancel?uploadId=' + encodeURIComponent(uploadId);
+      if (!(navigator.sendBeacon && navigator.sendBeacon(url))) {
+        fetch(url, { method: 'POST', keepalive: true }).catch(() => {});
+      }
+    }
+
+    // Closing or leaving the page kills in-flight uploads: tell the host right away
+    // instead of letting it wait for the inactivity timeout.
+    window.addEventListener('pagehide', () => {
+      inFlightUploads.forEach(cancelOnHost);
+    });
+
+    function uploadFiles(files) {
+      files.forEach(file => {
+        const ui = createUploadCard(file);
+        uploadQueue.push({ file, ui });
+      });
+      processQueue();
+    }
+
+    function processQueue() {
+      while (activeUploadsCount < MAX_CONCURRENT && uploadQueue.length > 0) {
+        const item = uploadQueue.shift();
+        activeUploadsCount++;
+        uploadSingleFileChunked(item.file, item.ui).finally(() => {
+          activeUploadsCount--;
+          processQueue();
+        });
+      }
+    }
+
+    function createUploadCard(file) {
       const card = document.createElement('div');
       card.className = 'file-card';
 
-      const fileId = 'f_' + Math.random().toString(36).slice(2);
-      const initialStatus = isEs ? 'Subiendo...' : 'Uploading...';
+      const fileId = 'f_' + Math.random().toString(36).slice(2) + '_' + Date.now();
+      const initialStatus = isEs ? 'En cola...' : 'Queued...';
 
       card.innerHTML = 
         '<div class="file-meta">' +
@@ -887,62 +1508,146 @@ var receivePageTemplate = template.Must(template.New("receive").Parse(`<!DOCTYPE
         '</div>';
 
       card.querySelector('#fn_' + fileId).textContent = file.name;
-
       filesList.prepend(card);
 
-      const pb = document.getElementById('pb_' + fileId);
-      const st = document.getElementById('st_' + fileId);
-      const sp = document.getElementById('sp_' + fileId);
+      return {
+        fileId: fileId,
+        pb: document.getElementById('pb_' + fileId),
+        st: document.getElementById('st_' + fileId),
+        sp: document.getElementById('sp_' + fileId)
+      };
+    }
 
-      const formData = new FormData();
-      formData.append('file', file);
+    function sendChunkWithRetry(url, blob, onChunkProgress, maxRetries) {
+      return new Promise((resolve, reject) => {
+        let attempt = 0;
 
-      const xhr = new XMLHttpRequest();
-      xhr.open('POST', '/upload', true);
+        function trySend() {
+          attempt++;
+          const xhr = new XMLHttpRequest();
+          xhr.open('POST', url, true);
+          xhr.setRequestHeader('Content-Type', 'application/octet-stream');
 
-      let startTime = Date.now();
-      let lastLoaded = 0;
+          xhr.upload.addEventListener('progress', (e) => {
+            if (e.lengthComputable && onChunkProgress) {
+              onChunkProgress(e.loaded);
+            }
+          });
 
-      xhr.upload.addEventListener('progress', (e) => {
-        if (e.lengthComputable) {
-          const percent = Math.min(100, Math.round((e.loaded / e.total) * 100));
-          pb.style.width = percent + '%';
-          
-          const now = Date.now();
-          const timeDiff = (now - startTime) / 1000;
-          let speedStr = '';
-          if (timeDiff > 0.3) {
-            const speed = e.loaded / timeDiff;
-            speedStr = ' · ' + formatSpeed(speed);
-          }
-          sp.textContent = percent + '%' + speedStr;
+          xhr.addEventListener('load', () => {
+            if (xhr.status >= 200 && xhr.status < 300) {
+              resolve();
+            } else if ((xhr.status >= 500 || xhr.status === 429) && attempt <= maxRetries) {
+              setTimeout(trySend, 1000 * attempt);
+            } else {
+              const statusMsg = xhr.statusText || (xhr.status ? 'HTTP ' + xhr.status : (isEs ? 'Error de red' : 'Network error'));
+              reject({ type: 'http', message: statusMsg });
+            }
+          });
+
+          xhr.addEventListener('error', () => {
+            if (attempt <= maxRetries) {
+              setTimeout(trySend, 1000 * attempt);
+            } else {
+              reject({ type: 'network', message: '' });
+            }
+          });
+
+          xhr.send(blob);
         }
-      });
 
-      xhr.addEventListener('load', () => {
-        if (xhr.status >= 200 && xhr.status < 300) {
-          pb.style.width = '100%';
-          pb.classList.add('done');
-          st.textContent = isEs ? '✓ Completado' : '✓ Completed';
-          st.className = 'status-badge done';
-          sp.textContent = '100%';
-        } else {
-          pb.classList.add('error');
-          st.textContent = isEs ? 'Error al subir' : 'Upload error';
-          st.className = 'status-badge error';
-          sp.textContent = xhr.statusText || (isEs ? 'Error de red' : 'Network error');
+        trySend();
+      });
+    }
+
+    async function uploadSingleFileChunked(file, ui) {
+      const { fileId, pb, st, sp } = ui;
+      st.textContent = isEs ? 'Subiendo...' : 'Uploading...';
+
+      const totalSize = file.size;
+      const totalChunks = Math.max(1, Math.ceil(totalSize / CHUNK_SIZE));
+
+      // Rolling window for real-time speed calculation (last 2.5 seconds)
+      const speedSamples = [];
+      let currentSpeed = 0;
+      let lastSpeedUpdate = 0;
+      let displaySpeedStr = '';
+
+      // Heartbeat so the host can tell "still uploading" from "sender gone". Driven by
+      // a timer and by progress events, since background tabs throttle timers.
+      inFlightUploads.add(fileId);
+      let lastPing = Date.now();
+      const maybePing = () => {
+        if (Date.now() - lastPing >= PING_INTERVAL_MS) {
+          lastPing = Date.now();
+          pingHost(fileId, currentSpeed);
         }
-      });
+      };
+      const pingTimer = setInterval(maybePing, PING_INTERVAL_MS);
 
-      xhr.addEventListener('error', () => {
+      try {
+        for (let chunkIndex = 0; chunkIndex < totalChunks; chunkIndex++) {
+          const start = chunkIndex * CHUNK_SIZE;
+          const end = Math.min(start + CHUNK_SIZE, totalSize);
+          const chunk = file.slice(start, end);
+
+          const url = '/upload?uploadId=' + encodeURIComponent(fileId) +
+            '&chunkIndex=' + chunkIndex +
+            '&totalChunks=' + totalChunks +
+            '&totalSize=' + totalSize +
+            '&fileName=' + encodeURIComponent(file.name) +
+            (currentSpeed > 0 ? '&clientSpeed=' + encodeURIComponent(Math.round(currentSpeed)) : '');
+
+          await sendChunkWithRetry(url, chunk, (chunkLoaded) => {
+            const now = Date.now();
+            const totalLoaded = start + chunkLoaded;
+
+            speedSamples.push({ t: now, b: totalLoaded });
+            while (speedSamples.length > 1 && (now - speedSamples[0].t) > 2500) {
+              speedSamples.shift();
+            }
+
+            // Update speed once every 1 second (1000ms) for consistency with desktop app
+            if (now - lastSpeedUpdate >= 1000) {
+              const dt = (now - speedSamples[0].t) / 1000;
+              const db = totalLoaded - speedSamples[0].b;
+              if (dt >= 0.4 && db >= 0) {
+                currentSpeed = db / dt;
+                displaySpeedStr = currentSpeed > 0 ? ' - ' + formatSpeed(currentSpeed) : '';
+                lastSpeedUpdate = now;
+              }
+            }
+
+            maybePing();
+
+            const percent = totalSize > 0 ? Math.min(100, Math.round((totalLoaded / totalSize) * 100)) : 100;
+            pb.style.width = percent + '%';
+            sp.textContent = percent + '%' + displaySpeedStr;
+          }, 3);
+        }
+
+        pb.style.width = '100%';
+        pb.classList.add('done');
+        st.textContent = isEs ? '✓ Completado' : '✓ Completed';
+        st.className = 'status-badge done';
+        sp.textContent = '100%';
+      } catch (err) {
+        cancelOnHost(fileId);
         pb.classList.add('error');
-        st.textContent = isEs ? 'Fallo de conexión' : 'Connection failed';
         st.className = 'status-badge error';
-        sp.textContent = '';
-      });
-
-      xhr.send(formData);
+        if (err && err.type === 'network') {
+          st.textContent = isEs ? 'Fallo de conexión' : 'Connection failed';
+          sp.textContent = '';
+        } else {
+          st.textContent = isEs ? 'Error al subir' : 'Upload error';
+          sp.textContent = (err && err.message) ? err.message : (isEs ? 'Error de red' : 'Network error');
+        }
+      } finally {
+        clearInterval(pingTimer);
+        inFlightUploads.delete(fileId);
+      }
     }
   </script>
 </body>
 </html>`))
+

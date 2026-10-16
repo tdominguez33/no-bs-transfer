@@ -109,32 +109,37 @@ func TestFormatTunnelError(t *testing.T) {
 		{
 			err:            fmt.Errorf("cloudflared se detuvo: Could not lookup srv records on _v2-origintunneld._tcp.argotunnel.com: lookup argotunnel.com: dnsquery: Se devolvió esta operación porque se agotó el tiempo de espera."),
 			isCustomDomain: true,
-			expectedMsg:    "No hay conexión a internet, modo no disponible",
+			expectedMsg:    ErrNoInternet,
 		},
 		{
 			err:            fmt.Errorf("dial tcp: lookup trycloudflare.com: no such host"),
 			isCustomDomain: false,
-			expectedMsg:    "No hay conexión a internet, modo no disponible",
+			expectedMsg:    ErrNoInternet,
 		},
 		{
 			err:            fmt.Errorf("cannot determine default configuration path: unauthorized token credentials"),
 			isCustomDomain: true,
-			expectedMsg:    "El token de Cloudflare Tunnel no es válido o ha expirado. Verifica el token en Configuración.",
+			expectedMsg:    ErrInvalidTunnelToken,
 		},
 		{
 			err:            fmt.Errorf("rate limit exceeded on trycloudflare.com: 503 Service Unavailable"),
 			isCustomDomain: false,
-			expectedMsg:    "Los servidores de túneles públicos de Cloudflare están saturados en este momento. Intenta nuevamente en unos instantes o utiliza Red Local.",
+			expectedMsg:    ErrTunnelRateLimited,
 		},
 		{
 			err:            fmt.Errorf("bind: address already in use"),
 			isCustomDomain: false,
-			expectedMsg:    "El puerto de red ya está en uso por otra aplicación. Modifícalo en Configuración.",
+			expectedMsg:    ErrPortInUse,
 		},
 		{
 			err:            fmt.Errorf("cloudflared no encontrado en el sistema"),
 			isCustomDomain: false,
-			expectedMsg:    "No se encontró el componente Cloudflared. Puedes descargarlo desde Configuración.",
+			expectedMsg:    ErrCloudflaredNotFound,
+		},
+		{
+			err:            fmt.Errorf("error al ejecutar cloudflared (dominio propio): executable file not found"),
+			isCustomDomain: true,
+			expectedMsg:    ErrCloudflaredNotFound,
 		},
 	}
 

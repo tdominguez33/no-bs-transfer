@@ -20,6 +20,8 @@ func prepareCmdPlatform(cmd *exec.Cmd) {
 // killProcessTree terminates the process and its child processes on Windows
 func killProcessTree(proc *os.Process) {
 	if proc != nil && proc.Pid > 0 {
-		_ = exec.Command("taskkill", "/T", "/F", "/PID", fmt.Sprintf("%d", proc.Pid)).Run()
+		cmd := exec.Command("taskkill", "/T", "/F", "/PID", fmt.Sprintf("%d", proc.Pid))
+		prepareCmdPlatform(cmd)
+		_ = cmd.Run()
 	}
 }
